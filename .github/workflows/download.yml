@@ -7,13 +7,18 @@ on:
         description: "Video page URL"
         required: true
 
+permissions:
+  contents: write
+
 jobs:
   download:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Install dependencies
         run: |
@@ -21,27 +26,34 @@ jobs:
           sudo apt install -y ffmpeg p7zip-full
           pip install yt-dlp
 
-      - name: Download video into unique folder
+      - name: Download video
         run: |
           set -e
 
           TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
-          BASE_DIR="downloads/${TIMESTAMP}"
+          BASE_DIR="downloads/$TIMESTAMP"
           mkdir -p "$BASE_DIR"
 
           yt-dlp \
             --no-playlist \
             -f "bv*+ba/best" \
-            -o "${BASE_DIR}/video.%(ext)s" \
+            -o "$BASE_DIR/video.%(ext)s" \
             "${{ github.event.inputs.url }}"
 
       - name: Split if larger than 100MB
         run: |
+          set -e
           cd downloads
           FOLDER=$(ls -td */ | head -n 1)
           cd "$FOLDER"
 
           FILE=$(ls video.* | head -n 1)
+
+          if [ ! -f "$FILE" ]; then
+            echo "No video file found!"
+            exit 1
+          fi
+
           SIZE_MB=$(du -m "$FILE" | cut -f1)
 
           if [ "$SIZE_MB" -gt 100 ]; then
@@ -52,10 +64,16 @@ jobs:
             echo "File under 100MB → no split needed"
           fi
 
-      - name: Commit files
+      - name: Commit and push
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
+
           git add downloads
-          git commit -m "Add downloaded video"
-          git push
+
+          if git diff --staged --quiet; then
+            echo "Nothing to commit"
+          else
+            git commit -m "Add downloaded video"
+            git push
+          fi
