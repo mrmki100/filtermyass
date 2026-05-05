@@ -15,10 +15,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
       - name: Install dependencies
         run: |
@@ -26,42 +25,71 @@ jobs:
           sudo apt install -y ffmpeg p7zip-full
           pip install yt-dlp
 
+          echo "Checking 7z installation"
+          which 7z
+          7z
+
       - name: Download video
         run: |
           set -e
 
           TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
-          BASE_DIR="downloads/$TIMESTAMP"
-          mkdir -p "$BASE_DIR"
+          DIR="downloads/$TIMESTAMP"
+
+          mkdir -p "$DIR"
 
           yt-dlp \
-            --no-playlist \
-            -f "bv*+ba/best" \
-            -o "$BASE_DIR/video.%(ext)s" \
-            "${{ github.event.inputs.url }}"
+          --no-playlist \
+          -f "bv*+ba/best" \
+          -o "$DIR/video.%(ext)s" \
+          "${{ github.event.inputs.url }}"
+
+          echo "Downloaded files:"
+          ls -lh "$DIR"
 
       - name: Split if larger than 100MB
         run: |
           set -e
+
+          echo "Entering downloads folder"
           cd downloads
+
+          echo "Folders:"
+          ls -l
+
           FOLDER=$(ls -td */ | head -n 1)
+          echo "Latest folder: $FOLDER"
+
           cd "$FOLDER"
 
-          FILE=$(ls video.* | head -n 1)
+          echo "Files inside folder:"
+          ls -lh
 
-          if [ ! -f "$FILE" ]; then
-            echo "No video file found!"
+          FILE=$(ls video.* | head -n 1 || true)
+
+          if [ -z "$FILE" ]; then
+            echo "ERROR: No video file found"
             exit 1
           fi
 
+          echo "Video file: $FILE"
+
           SIZE_MB=$(du -m "$FILE" | cut -f1)
+
+          echo "Video size: $SIZE_MB MB"
 
           if [ "$SIZE_MB" -gt 100 ]; then
             echo "File larger than 100MB → splitting"
-            7z a -v90m video.zip "$FILE"
+
+            7z a video.zip "$FILE" -v90m
+
+            echo "Split files:"
+            ls -lh
+
             rm "$FILE"
+
           else
-            echo "File under 100MB → no split needed"
+            echo "File smaller than 100MB → no split needed"
           fi
 
       - name: Commit and push
