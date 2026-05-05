@@ -6,6 +6,7 @@ on:
       url:
         description: "Video page URL"
         required: true
+        type: string
 
 permissions:
   contents: write
@@ -29,16 +30,11 @@ jobs:
         mkdir -p "downloads/$ts"
         echo "DL_DIR=downloads/$ts" >> $GITHUB_ENV
 
-    - name: Download video with yt-dlp (PornHub fix: use cookies)
+    - name: Download video with yt-dlp
       run: |
         yt-dlp \
-          --cookies-from-browser chrome \
-          --cookies "$PH_COOKIE" \
-          --no-check-certificate \
           -o "$DL_DIR/video.%(ext)s" \
           "${{ github.event.inputs.url }}"
-      env:
-        PH_COOKIE: ${{ secrets.PH_COOKIE }}
 
     - name: Check if file downloaded
       id: checkfile
@@ -51,7 +47,6 @@ jobs:
         fi
 
     - name: Split if over 100MB
-      if: success()
       run: |
         cd "$DL_DIR"
         FILESIZE=$(stat -c%s "$FILE")
@@ -59,17 +54,17 @@ jobs:
         echo "File size = $FILESIZE bytes"
 
         if [ $FILESIZE -gt 100000000 ]; then
-          echo "Splitting file into 90MB parts..."
+          echo "Splitting file..."
           7z a -v90m "archive.7z" "$FILE"
           rm "$FILE"
         else
-          echo "File is under 100MB → no split needed."
+          echo "Under 100MB → no split."
         fi
 
     - name: Commit and push
       run: |
         git config user.name "github-actions"
-        git config user.email "git-actions@github.com"
+        git config.user.email "git-actions@github.com"
         git add downloads
         git commit -m "Add downloaded video"
         git push
