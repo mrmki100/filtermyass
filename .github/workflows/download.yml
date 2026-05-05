@@ -63,8 +63,8 @@ jobs:
             DL_DIR="downloads/$ts"
             mkdir -p "$DL_DIR"
 
-            yt-dlp -o "$DL_DIR/video.%(ext)s" "$url"
-
+            yt-dlp --no-playlist -o "$DL_DIR/video.%(ext)s" "$url"
+            
             FILE=$(ls "$DL_DIR" | head -n 1 || true)
 
             if [ -z "$FILE" ]; then
