@@ -3,8 +3,8 @@ name: Video Downloader
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: "Video page URL"
+      urls:
+        description: "Video URLs (one per line)"
         required: true
         type: string
 
@@ -19,53 +19,58 @@ jobs:
     - name: Checkout repo
       uses: actions/checkout@v4
 
-    - name: Install yt-dlp (only dependency)
+    - name: Install yt-dlp
       run: |
         python3 -m pip install --upgrade pip
         pip install yt-dlp
+        sudo apt-get update
+        sudo apt-get install -y p7zip-full
 
-    - name: Create download folder
+    - name: Process all URLs
       run: |
-        ts=$(date +"%Y-%m-%d_%H-%M-%S")
-        mkdir -p "downloads/$ts"
-        echo "DL_DIR=downloads/$ts" >> $GITHUB_ENV
+        echo "${{ github.event.inputs.urls }}" > urls.txt
 
-    - name: Download video with yt-dlp
-      run: |
-        yt-dlp \
-          -o "$DL_DIR/video.%(ext)s" \
-          "${{ github.event.inputs.url }}"
+        while IFS= read -r url
+        do
+          if [ -z "$url" ]; then
+            continue
+          fi
 
-    - name: Check if file downloaded
-      id: checkfile
-      run: |
-        file=$(ls "$DL_DIR" | head -n 1 || true)
-        echo "FILE=$file" >> $GITHUB_ENV
-        if [ -z "$file" ]; then
-          echo "No file downloaded. Stopping."
-          exit 1
-        fi
+          echo "Processing $url"
 
-    - name: Split if over 100MB
-      run: |
-        cd "$DL_DIR"
-        FILESIZE=$(stat -c%s "$FILE")
+          ts=$(date +"%Y-%m-%d_%H-%M-%S")
+          DL_DIR="downloads/$ts"
+          mkdir -p "$DL_DIR"
 
-        echo "File size = $FILESIZE bytes"
+          yt-dlp -o "$DL_DIR/video.%(ext)s" "$url"
 
-        if [ $FILESIZE -gt 100000000 ]; then
-          echo "Splitting file..."
-          7z a -v90m "archive.7z" "$FILE"
-          rm "$FILE"
-        else
-          echo "Under 100MB → no split."
-        fi
+          FILE=$(ls "$DL_DIR" | head -n 1 || true)
+
+          if [ -z "$FILE" ]; then
+            echo "Download failed for $url"
+            continue
+          fi
+
+          cd "$DL_DIR"
+
+          FILESIZE=$(stat -c%s "$FILE")
+
+          if [ $FILESIZE -gt 100000000 ]; then
+            echo "Splitting large file..."
+            7z a -v90m "archive.7z" "$FILE"
+            rm "$FILE"
+          fi
+
+          cd ../../
+
+          sleep 2
+
+        done < urls.txt
 
     - name: Commit and push
       run: |
         git config user.name "github-actions"
         git config user.email "github-actions@github.com"
         git add downloads
-        git commit -m "Add downloaded video"
+        git commit -m "Add downloaded videos" || echo "Nothing to commit"
         git push
-
