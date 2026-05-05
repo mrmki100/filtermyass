@@ -15,93 +15,62 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: Install yt-dlp (only dependency)
+      run: |
+        python3 -m pip install --upgrade pip
+        pip install yt-dlp
 
-      - name: Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y ffmpeg p7zip-full
-          pip install yt-dlp
+    - name: Create download folder
+      run: |
+        ts=$(date +"%Y-%m-%d_%H-%M-%S")
+        mkdir -p "downloads/$ts"
+        echo "DL_DIR=downloads/$ts" >> $GITHUB_ENV
 
-          echo "Checking 7z installation"
-          which 7z
-          7z
-
-      - name: Download video
-        run: |
-          set -e
-
-          TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
-          DIR="downloads/$TIMESTAMP"
-
-          mkdir -p "$DIR"
-
-          yt-dlp \
-          --no-playlist \
-          -f "bv*+ba/best" \
-          -o "$DIR/video.%(ext)s" \
+    - name: Download video with yt-dlp (PornHub fix: use cookies)
+      run: |
+        yt-dlp \
+          --cookies-from-browser chrome \
+          --cookies "$PH_COOKIE" \
+          --no-check-certificate \
+          -o "$DL_DIR/video.%(ext)s" \
           "${{ github.event.inputs.url }}"
+      env:
+        PH_COOKIE: ${{ secrets.PH_COOKIE }}
 
-          echo "Downloaded files:"
-          ls -lh "$DIR"
+    - name: Check if file downloaded
+      id: checkfile
+      run: |
+        file=$(ls "$DL_DIR" | head -n 1 || true)
+        echo "FILE=$file" >> $GITHUB_ENV
+        if [ -z "$file" ]; then
+          echo "No file downloaded. Stopping."
+          exit 1
+        fi
 
-      - name: Split if larger than 100MB
-        run: |
-          set -e
+    - name: Split if over 100MB
+      if: success()
+      run: |
+        cd "$DL_DIR"
+        FILESIZE=$(stat -c%s "$FILE")
 
-          echo "Entering downloads folder"
-          cd downloads
+        echo "File size = $FILESIZE bytes"
 
-          echo "Folders:"
-          ls -l
+        if [ $FILESIZE -gt 100000000 ]; then
+          echo "Splitting file into 90MB parts..."
+          7z a -v90m "archive.7z" "$FILE"
+          rm "$FILE"
+        else
+          echo "File is under 100MB → no split needed."
+        fi
 
-          FOLDER=$(ls -td */ | head -n 1)
-          echo "Latest folder: $FOLDER"
-
-          cd "$FOLDER"
-
-          echo "Files inside folder:"
-          ls -lh
-
-          FILE=$(ls video.* | head -n 1 || true)
-
-          if [ -z "$FILE" ]; then
-            echo "ERROR: No video file found"
-            exit 1
-          fi
-
-          echo "Video file: $FILE"
-
-          SIZE_MB=$(du -m "$FILE" | cut -f1)
-
-          echo "Video size: $SIZE_MB MB"
-
-          if [ "$SIZE_MB" -gt 100 ]; then
-            echo "File larger than 100MB → splitting"
-
-            7z a video.zip "$FILE" -v90m
-
-            echo "Split files:"
-            ls -lh
-
-            rm "$FILE"
-
-          else
-            echo "File smaller than 100MB → no split needed"
-          fi
-
-      - name: Commit and push
-        run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-
-          git add downloads
-
-          if git diff --staged --quiet; then
-            echo "Nothing to commit"
-          else
-            git commit -m "Add downloaded video"
-            git push
-          fi
+    - name: Commit and push
+      run: |
+        git config user.name "github-actions"
+        git config user.email "git-actions@github.com"
+        git add downloads
+        git commit -m "Add downloaded video"
+        git push
+`
