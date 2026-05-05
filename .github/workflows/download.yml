@@ -1,0 +1,61 @@
+name: Video Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Video page URL"
+        required: true
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y ffmpeg p7zip-full
+          pip install yt-dlp
+
+      - name: Download video into unique folder
+        run: |
+          set -e
+
+          TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+          BASE_DIR="downloads/${TIMESTAMP}"
+          mkdir -p "$BASE_DIR"
+
+          yt-dlp \
+            --no-playlist \
+            -f "bv*+ba/best" \
+            -o "${BASE_DIR}/video.%(ext)s" \
+            "${{ github.event.inputs.url }}"
+
+      - name: Split if larger than 100MB
+        run: |
+          cd downloads
+          FOLDER=$(ls -td */ | head -n 1)
+          cd "$FOLDER"
+
+          FILE=$(ls video.* | head -n 1)
+          SIZE_MB=$(du -m "$FILE" | cut -f1)
+
+          if [ "$SIZE_MB" -gt 100 ]; then
+            echo "File larger than 100MB → splitting"
+            7z a -v90m video.zip "$FILE"
+            rm "$FILE"
+          else
+            echo "File under 100MB → no split needed"
+          fi
+
+      - name: Commit files
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add downloads
+          git commit -m "Add downloaded video"
+          git push
