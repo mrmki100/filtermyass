@@ -3,9 +3,25 @@ name: Video Downloader
 on:
   workflow_dispatch:
     inputs:
-      urls:
-        description: "Video URLs (one per line)"
-        required: true
+      url1:
+        description: "Video URL 1"
+        required: false
+        type: string
+      url2:
+        description: "Video URL 2"
+        required: false
+        type: string
+      url3:
+        description: "Video URL 3"
+        required: false
+        type: string
+      url4:
+        description: "Video URL 4"
+        required: false
+        type: string
+      url5:
+        description: "Video URL 5"
+        required: false
         type: string
 
 permissions:
@@ -26,46 +42,55 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y p7zip-full
 
-    - name: Process all URLs
+    - name: Prepare URL list
       run: |
-        echo "${{ github.event.inputs.urls }}" > urls.txt
+        echo "${{ github.event.inputs.url1 }}" >> urls.txt
+        echo "${{ github.event.inputs.url2 }}" >> urls.txt
+        echo "${{ github.event.inputs.url3 }}" >> urls.txt
+        echo "${{ github.event.inputs.url4 }}" >> urls.txt
+        echo "${{ github.event.inputs.url5 }}" >> urls.txt
 
+    - name: Download videos (parallel)
+      run: |
         while IFS= read -r url
         do
           if [ -z "$url" ]; then
             continue
           fi
 
-          echo "Processing $url"
+          (
+            ts=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
+            DL_DIR="downloads/$ts"
+            mkdir -p "$DL_DIR"
 
-          ts=$(date +"%Y-%m-%d_%H-%M-%S")
-          DL_DIR="downloads/$ts"
-          mkdir -p "$DL_DIR"
+            yt-dlp -o "$DL_DIR/video.%(ext)s" "$url"
 
-          yt-dlp -o "$DL_DIR/video.%(ext)s" "$url"
+            FILE=$(ls "$DL_DIR" | head -n 1 || true)
 
-          FILE=$(ls "$DL_DIR" | head -n 1 || true)
+            if [ -z "$FILE" ]; then
+              echo "Download failed: $url"
+              exit 0
+            fi
 
-          if [ -z "$FILE" ]; then
-            echo "Download failed for $url"
-            continue
-          fi
+            cd "$DL_DIR"
 
-          cd "$DL_DIR"
+            FILESIZE=$(stat -c%s "$FILE")
 
-          FILESIZE=$(stat -c%s "$FILE")
+            echo "File size = $FILESIZE bytes"
 
-          if [ $FILESIZE -gt 100000000 ]; then
-            echo "Splitting large file..."
-            7z a -v90m "archive.7z" "$FILE"
-            rm "$FILE"
-          fi
+            if [ $FILESIZE -gt 100000000 ]; then
+              echo "Splitting file..."
+              7z a -v90m "archive.7z" "$FILE"
+              rm "$FILE"
+            fi
 
-          cd ../../
+            cd ../../
 
-          sleep 2
+          ) &
 
         done < urls.txt
+
+        wait
 
     - name: Commit and push
       run: |
