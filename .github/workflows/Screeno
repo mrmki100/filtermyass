@@ -1,0 +1,128 @@
+name: Website S-shot Tool
+
+on:
+  workflow_dispatch:
+    inputs:
+      url1:
+        description: "Website URL 1"
+        required: false
+        type: string
+
+      url2:
+        description: "Website URL 2"
+        required: false
+        type: string
+
+      url3:
+        description: "Website URL 3"
+        required: false
+        type: string
+
+      url4:
+        description: "Website URL 4"
+        required: false
+        type: string
+
+      url5:
+        description: "Website URL 5"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  screenshot:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Playwright
+      run: |
+        python3 -m pip install --upgrade pip
+        pip install playwright
+        playwright install chromium
+
+    - name: Prepare URL list
+      run: |
+        echo "${{ github.event.inputs.url1 }}" >> urls.txt
+        echo "${{ github.event.inputs.url2 }}" >> urls.txt
+        echo "${{ github.event.inputs.url3 }}" >> urls.txt
+        echo "${{ github.event.inputs.url4 }}" >> urls.txt
+        echo "${{ github.event.inputs.url5 }}" >> urls.txt
+
+    - name: Create screenshot script
+      run: |
+        cat > screenshot.py << 'EOF'
+        from playwright.sync_api import sync_playwright
+        import sys
+        import os
+        import time
+
+        url = sys.argv[1]
+        output_dir = sys.argv[2]
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled"
+                ]
+            )
+
+            page = browser.new_page(
+                viewport={"width": 1920, "height": 1080}
+            )
+
+            page.goto(url, wait_until="networkidle", timeout=120000)
+
+            time.sleep(3)
+
+            page.screenshot(
+                path=f"{output_dir}/screenshot.png",
+                full_page=True
+            )
+
+            browser.close()
+        EOF
+
+    - name: Capture screenshots (parallel)
+      run: |
+        mkdir -p screenshots
+
+        while IFS= read -r url
+        do
+          if [ -z "$url" ]; then
+            continue
+          fi
+
+          (
+            ts=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
+            OUT_DIR="screenshots/$ts"
+
+            mkdir -p "$OUT_DIR"
+
+            echo "Capturing: $url"
+
+            python3 screenshot.py "$url" "$OUT_DIR"
+
+          ) &
+
+        done < urls.txt
+
+        wait
+
+    - name: Commit and push screenshots
+      run: |
+        git config user.name "github-actions"
+        git config user.email "github-actions@github.com"
+
+        git add screenshots
+
+        git commit -m "Add website screenshots" || echo "Nothing to commit"
+
+        git push
