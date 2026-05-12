@@ -1,0 +1,209 @@
+name: WA
+
+on:
+  workflow_dispatch:
+    inputs:
+      u1:
+        description: "URL 1"
+        required: false
+        type: string
+
+      u2:
+        description: "URL 2"
+        required: false
+        type: string
+
+      u3:
+        description: "URL 3"
+        required: false
+        type: string
+
+      u4:
+        description: "URL 4"
+        required: false
+        type: string
+
+      u5:
+        description: "URL 5"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  wa:
+    runs-on: ubuntu-latest
+
+    steps:
+
+    - name: CO
+      uses: actions/checkout@v4
+
+    - name: IN
+      run: |
+        python3 -m pip install --upgrade pip
+        pip install playwright
+        playwright install chromium
+
+    - name: URL
+      run: |
+        echo "${{ github.event.inputs.u1 }}" >> u.txt
+        echo "${{ github.event.inputs.u2 }}" >> u.txt
+        echo "${{ github.event.inputs.u3 }}" >> u.txt
+        echo "${{ github.event.inputs.u4 }}" >> u.txt
+        echo "${{ github.event.inputs.u5 }}" >> u.txt
+
+    - name: PY
+      run: |
+        cat > wa.py << 'EOF'
+        from playwright.sync_api import sync_playwright
+        import sys
+        import os
+        import json
+        import time
+        import re
+
+        url = sys.argv[1]
+        out_dir = sys.argv[2]
+
+        os.makedirs(out_dir, exist_ok=True)
+
+        def clean_name(text):
+            text = re.sub(r'[\\/*?:"<>|]', "", text)
+            text = text.strip()
+            return text[:80]
+
+        with sync_playwright() as p:
+
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage"
+                ]
+            )
+
+            page = browser.new_page(
+                viewport={
+                    "width": 1920,
+                    "height": 1080
+                }
+            )
+
+            page.goto(
+                url,
+                wait_until="networkidle",
+                timeout=120000
+            )
+
+            time.sleep(3)
+
+            title = page.title()
+
+            if not title:
+                title = "page"
+
+            title = clean_name(title)
+
+            meta = page.evaluate("""
+            () => {
+                const get = (n) => {
+                    const e =
+                        document.querySelector(`meta[name="${n}"]`) ||
+                        document.querySelector(`meta[property="${n}"]`);
+                    return e ? e.content : "";
+                };
+
+                return {
+                    title: document.title,
+                    description: get("description"),
+                    og_title: get("og:title"),
+                    og_description: get("og:description"),
+                    og_image: get("og:image"),
+                    canonical:
+                        document.querySelector('link[rel="canonical"]')?.href || "",
+                    url: location.href
+                };
+            }
+            """)
+
+            page.screenshot(
+                path=f"{out_dir}/ss.png",
+                full_page=True
+            )
+
+            page.pdf(
+                path=f"{out_dir}/pg.pdf",
+                format="A4",
+                print_background=True
+            )
+
+            html = page.content()
+
+            with open(f"{out_dir}/pg.html", "w", encoding="utf-8") as f:
+                f.write(html)
+
+            with open(f"{out_dir}/meta.json", "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2, ensure_ascii=False)
+
+            with open(f"{out_dir}/title.txt", "w", encoding="utf-8") as f:
+                f.write(title)
+
+            browser.close()
+        EOF
+
+    - name: RUN
+      run: |
+        mkdir -p wa
+
+        while IFS= read -r url
+        do
+
+          if [ -z "$url" ]; then
+            continue
+          fi
+
+          (
+            TS=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
+
+            DIR="wa/$TS"
+
+            mkdir -p "$DIR"
+
+            echo "ARCHIVE: $url"
+
+            python3 wa.py "$url" "$DIR"
+
+          ) &
+
+        done < u.txt
+
+        wait
+
+    - name: ZIP
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y p7zip-full
+
+        find wa -type d -mindepth 1 -maxdepth 1 | while read d
+        do
+          SIZE=$(du -sm "$d" | cut -f1)
+
+          if [ "$SIZE" -gt 90 ]; then
+            7z a -v90m "${d}.7z" "$d"
+            rm -rf "$d"
+          fi
+        done
+
+    - name: PUSH
+      run: |
+        git config user.name "github-actions"
+        git config user.email "github-actions@github.com"
+
+        git add wa
+
+        git commit -m "wa update" || echo "nothing"
+
+        git push
