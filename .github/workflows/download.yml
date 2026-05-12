@@ -30,61 +30,296 @@ permissions:
 jobs:
   download:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
-    - name: Checkout repo
+
+    - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Install yt-dlp
+    - name: Install dependencies
       run: |
+
         python3 -m pip install --upgrade pip
-        pip install yt-dlp
+
+        pip install \
+          yt-dlp \
+          playwright
+
         sudo apt-get update
-        sudo apt-get install -y p7zip-full
 
-    - name: Prepare URL list
-      run: |
-        echo "${{ github.event.inputs.url1 }}" >> urls.txt
-        echo "${{ github.event.inputs.url2 }}" >> urls.txt
-        echo "${{ github.event.inputs.url3 }}" >> urls.txt
-        echo "${{ github.event.inputs.url4 }}" >> urls.txt
-        echo "${{ github.event.inputs.url5 }}" >> urls.txt
+        sudo apt-get install -y \
+          ffmpeg \
+          wget \
+          curl \
+          jq \
+          p7zip-full
 
-    - name: Download videos (parallel)
+        playwright install chromium
+
+    - name: Prepare URLs
       run: |
-        while IFS= read -r url
+
+        cat > urls.txt << EOF
+        ${{ github.event.inputs.url1 }}
+        ${{ github.event.inputs.url2 }}
+        ${{ github.event.inputs.url3 }}
+        ${{ github.event.inputs.url4 }}
+        ${{ github.event.inputs.url5 }}
+        EOF
+
+        sed -i '/^$/d' urls.txt
+
+    - name: Create HARD extractor
+      run: |
+
+        cat > hard_extract.py << 'PY'
+        import sys
+        import json
+        from playwright.sync_api import sync_playwright
+
+        url = sys.argv[1]
+
+        found = []
+
+        def valid(u):
+            bad = [
+                ".jpg",
+                ".jpeg",
+                ".png",
+                ".gif",
+                ".css",
+                ".js",
+                "logo",
+                "banner"
+            ]
+
+            for b in bad:
+                if b in u.lower():
+                    return False
+
+            good = [
+                ".mp4",
+                ".m3u8",
+                ".mpd",
+                "videoplayback",
+                "manifest"
+            ]
+
+            return any(g in u.lower() for g in good)
+
+        with sync_playwright() as p:
+
+            browser = p.chromium.launch(
+                headless=True
+            )
+
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 720}
+            )
+
+            page = context.new_page()
+
+            def handle_response(response):
+
+                try:
+                    u = response.url
+
+                    ct = response.headers.get("content-type", "")
+
+                    if valid(u) or "video" in ct:
+                        found.append({
+                            "url": u,
+                            "content_type": ct
+                        })
+
+                except:
+                    pass
+
+            page.on("response", handle_response)
+
+            try:
+
+                page.goto(
+                    url,
+                    wait_until="networkidle",
+                    timeout=90000
+                )
+
+                page.wait_for_timeout(12000)
+
+                try:
+                    page.locator("video").click(timeout=5000)
+                except:
+                    pass
+
+                page.wait_for_timeout(10000)
+
+            except Exception as e:
+                print("ERROR:", e)
+
+            browser.close()
+
+        unique = []
+
+        seen = set()
+
+        for item in found:
+
+            u = item["url"]
+
+            if u not in seen:
+                seen.add(u)
+                unique.append(item)
+
+        print(json.dumps(unique, indent=2))
+        PY
+
+    - name: Download
+      run: |
+
+        mkdir -p downloads
+
+        while IFS= read -r URL
         do
-          if [ -z "$url" ]; then
-            continue
-          fi
+
+          echo "=============================="
+          echo "URL: $URL"
+          echo "=============================="
 
           (
-            ts=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
-            DL_DIR="downloads/$ts"
-            mkdir -p "$DL_DIR"
+            TS=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
 
-            yt-dlp --no-playlist -o "$DL_DIR/video.%(ext)s" "$url"
-            
-            FILE=$(ls "$DL_DIR" | head -n 1 || true)
+            DIR="downloads/$TS"
 
-            if [ -z "$FILE" ]; then
-              echo "Download failed: $url"
-              exit 0
+            mkdir -p "$DIR"
+
+            ############################################
+            # STEP 1
+            # NORMAL YT-DLP
+            ############################################
+
+            echo "STEP 1: yt-dlp"
+
+            yt-dlp \
+              --no-playlist \
+              -f "bestvideo+bestaudio/best" \
+              --merge-output-format mp4 \
+              --retries 10 \
+              --fragment-retries 10 \
+              --concurrent-fragments 4 \
+              -o "$DIR/%(title).120s_%(id)s.%(ext)s" \
+              "$URL" || true
+
+            FILE=$(find "$DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" \) | head -n 1 || true)
+
+            SIZE=0
+
+            if [ ! -z "$FILE" ]; then
+              SIZE=$(stat -c%s "$FILE")
             fi
 
-            cd "$DL_DIR"
+            ############################################
+            # CHECK FAILED / TINY FILE
+            ############################################
 
-            FILESIZE=$(stat -c%s "$FILE")
+            if [ -z "$FILE" ] || [ $SIZE -lt 1000000 ]; then
 
-            echo "File size = $FILESIZE bytes"
+              echo "yt-dlp failed or tiny file"
+              echo "STARTING HARD MODE"
 
-            if [ $FILESIZE -gt 100000000 ]; then
-              echo "Splitting file..."
-              7z a -v90m "archive.7z" "$FILE"
-              rm "$FILE"
+              rm -f "$DIR"/* || true
+
+              ##########################################
+              # STEP 2
+              # NETWORK INTERCEPTION
+              ##########################################
+
+              python3 hard_extract.py "$URL" > "$DIR/media.json"
+
+              echo "FOUND MEDIA:"
+              cat "$DIR/media.json"
+
+              ##########################################
+              # PICK BEST URL
+              ##########################################
+
+              MEDIA=$(cat "$DIR/media.json" \
+                | jq -r '.[].url' \
+                | grep -Ei '\.m3u8|\.mp4|manifest|videoplayback' \
+                | tail -n 1)
+
+              echo "SELECTED:"
+              echo "$MEDIA"
+
+              ##########################################
+              # STEP 3
+              # DOWNLOAD REAL STREAM
+              ##########################################
+
+              if [[ "$MEDIA" == *".m3u8"* ]]; then
+
+                echo "Downloading HLS stream..."
+
+                yt-dlp \
+                  --referer "$URL" \
+                  -f "best" \
+                  --merge-output-format mp4 \
+                  -o "$DIR/hardmode.%(ext)s" \
+                  "$MEDIA" || true
+
+              elif [ ! -z "$MEDIA" ]; then
+
+                echo "Downloading direct media..."
+
+                wget \
+                  --referer="$URL" \
+                  --user-agent="Mozilla/5.0" \
+                  -O "$DIR/hardmode.mp4" \
+                  "$MEDIA" || true
+              fi
+
+              FILE=$(find "$DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" \) | head -n 1 || true)
+
             fi
 
-            cd ../../
+            ############################################
+            # FINAL VALIDATION
+            ############################################
+
+            if [ -f "$FILE" ]; then
+
+              FINALSIZE=$(stat -c%s "$FILE")
+
+              echo "FINAL SIZE:"
+              echo "$FINALSIZE"
+
+              if [ $FINALSIZE -lt 1000000 ]; then
+                echo "Still tiny. Marking failed."
+                rm -f "$FILE"
+              fi
+
+            fi
+
+            ############################################
+            # SPLIT LARGE FILES
+            ############################################
+
+            FILE=$(find "$DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" \) | head -n 1 || true)
+
+            if [ ! -z "$FILE" ]; then
+
+              FINALSIZE=$(stat -c%s "$FILE")
+
+              if [ $FINALSIZE -gt 95000000 ]; then
+
+                echo "Splitting archive..."
+
+                7z a -v90m "$DIR/video.7z" "$FILE"
+
+                rm -f "$FILE"
+              fi
+            fi
 
           ) &
 
@@ -92,10 +327,14 @@ jobs:
 
         wait
 
-    - name: Commit and push
+    - name: Push results
       run: |
+
         git config user.name "github-actions"
         git config user.email "github-actions@github.com"
+
         git add downloads
-        git commit -m "Add downloaded videos" || echo "Nothing to commit"
+
+        git commit -m "Downloaded videos" || echo "Nothing to commit"
+
         git push
