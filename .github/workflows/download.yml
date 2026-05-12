@@ -1,469 +1,301 @@
-name: Ultimate Video Downloader V5
+name: downloader
 
 on:
   workflow_dispatch:
-    inputs:
-      url1:
-        description: "Video URL 1"
-        required: false
-      url2:
-        description: "Video URL 2"
-        required: false
-      url3:
-        description: "Video URL 3"
-        required: false
-      url4:
-        description: "Video URL 4"
-        required: false
-      url5:
-        description: "Video URL 5"
-        required: false
-
-permissions:
-  contents: write
 
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
 
     steps:
 
-    ############################################################
-    # CHECKOUT
-    ############################################################
+      ########################################################
+      # CHECKOUT
+      ########################################################
 
-    - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    ############################################################
-    # INSTALL
-    ############################################################
+      ########################################################
+      # REQUIREMENTS
+      ########################################################
 
-    - name: Install dependencies
-      run: |
+      - name: Install requirements
+        run: |
+          sudo apt-get update
 
-        python3 -m pip install --upgrade pip
+          sudo apt-get install -y \
+            ffmpeg \
+            mediainfo \
+            jq \
+            p7zip-full
 
-        pip install \
-          yt-dlp \
-          playwright \
-          requests
+          pip install yt-dlp playwright
 
-        sudo apt-get update
+          playwright install chromium
 
-        sudo apt-get install -y \
-          ffmpeg \
-          jq \
-          curl \
-          wget \
-          mediainfo \
-          p7zip-full
+      ########################################################
+      # CREATE INTERCEPTOR
+      ########################################################
 
-        playwright install chromium
+      - name: Create interceptor
+        run: |
+          cat > interceptor.py << 'PY'
+          import asyncio
+          import json
+          from playwright.async_api import async_playwright
 
-    ############################################################
-    # URLS
-    ############################################################
+          async def main(url):
 
-    - name: Prepare URLs
-      run: |
+              media = set()
 
-        cat > urls.txt <<EOF
-        ${{ github.event.inputs.url1 }}
-        ${{ github.event.inputs.url2 }}
-        ${{ github.event.inputs.url3 }}
-        ${{ github.event.inputs.url4 }}
-        ${{ github.event.inputs.url5 }}
-        EOF
+              async with async_playwright() as p:
 
-        sed -i '/^$/d' urls.txt
+                  browser = await p.chromium.launch(headless=True)
 
-    ############################################################
-    # PLAYWRIGHT INTERCEPTOR
-    ############################################################
+                  context = await browser.new_context()
 
-    - name: Create interceptor
-      run: |
+                  page = await context.new_page()
 
-        cat > interceptor.py << 'PY'
-        import json
-        import sys
-        from playwright.sync_api import sync_playwright
+                  def handle_response(resp):
+                      try:
+                          u = resp.url
 
-        target=sys.argv[1]
+                          if any(x in u.lower() for x in [
+                              ".m3u8",
+                              ".mp4",
+                              "/media/",
+                              "/hls/"
+                          ]):
+                              media.add(u)
 
-        found=[]
+                      except:
+                          pass
 
-        BAD=[
-            "ads",
-            "doubleclick",
-            "analytics",
-            "banner",
-            "sprite",
-            "thumb",
-            "preview",
-            "trailer",
-            "logo"
-        ]
+                  page.on("response", handle_response)
 
-        def bad(url):
-            u=url.lower()
-            return any(x in u for x in BAD)
+                  try:
+                      await page.goto(
+                          url,
+                          wait_until="networkidle",
+                          timeout=120000
+                      )
+                  except:
+                      pass
 
-        with sync_playwright() as p:
+                  try:
+                      await page.mouse.move(500, 400)
+                      await page.mouse.click(500, 400)
+                  except:
+                      pass
 
-            browser=p.chromium.launch(
-                headless=True
-            )
+                  await page.wait_for_timeout(15000)
 
-            context=browser.new_context(
-                viewport={"width":1920,"height":1080},
-                user_agent="Mozilla/5.0"
-            )
+                  cookies = await context.cookies()
 
-            page=context.new_page()
+                  await browser.close()
 
-            def on_response(r):
+                  print(json.dumps({
+                      "media": [{"url": x} for x in sorted(media)],
+                      "cookies": cookies
+                  }))
 
-                try:
+          import sys
 
-                    url=r.url
-                    ct=r.headers.get("content-type","")
+          asyncio.run(main(sys.argv[1]))
+          PY
 
-                    if bad(url):
-                        return
+      ########################################################
+      # DOWNLOAD
+      ########################################################
 
-                    if (
-                        ".m3u8" in url
-                        or ".mp4" in url
-                        or "mpegurl" in ct
-                        or "video" in ct
-                        or "manifest" in url
-                    ):
+      - name: Download videos
+        run: |
 
-                        found.append({
-                            "url":url,
-                            "content_type":ct
-                        })
+          mkdir -p downloads
 
-                except:
-                    pass
+          while IFS= read -r URL
+          do
 
-            page.on("response", on_response)
+            echo "======================================"
+            echo "PROCESSING: $URL"
+            echo "======================================"
 
-            page.goto(
-                target,
-                timeout=120000,
-                wait_until="networkidle"
-            )
+            TS=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
 
-            try:
-                page.locator("video").click(timeout=5000)
-            except:
-                pass
+            DIR="downloads/$TS"
 
-            try:
-                page.mouse.click(800,400)
-            except:
-                pass
+            mkdir -p "$DIR"
 
-            page.wait_for_timeout(25000)
+            ##################################################
+            # NORMAL MODE
+            ##################################################
 
-            cookies=context.cookies()
+            yt-dlp \
+              --no-playlist \
+              --extractor-retries 20 \
+              --fragment-retries 50 \
+              --retries 50 \
+              --user-agent "Mozilla/5.0" \
+              --merge-output-format mp4 \
+              -f "bestvideo+bestaudio/best" \
+              -o "$DIR/%(title)s.%(ext)s" \
+              "$URL" || true
 
-            print(json.dumps({
-                "media":found,
-                "cookies":cookies
-            }))
+            FILE=$(find "$DIR" -iname "*.mp4" | head -n1 || true)
 
-            browser.close()
-        PY
+            VALID=0
 
-    ############################################################
-    # NORMALIZER
-    ############################################################
+            if [ ! -z "$FILE" ]; then
 
-    - name: Create stream normalizer
-      run: |
+              SIZE=$(stat -c%s "$FILE")
 
-        cat > normalize.py << 'PY'
-        import re
-        import sys
+              echo "FOUND SIZE=$SIZE"
 
-        url=sys.argv[1]
+              if [ "$SIZE" -gt 5000000 ]; then
+                VALID=1
+              fi
 
-        original=url
-
-        # REMOVE SPACES
-        url=url.strip()
-
-        # REMOVE DUPLICATES
-        url=url.replace(",,",",")
-
-        # HELLO.PORN HYBRID PLAYLIST
-        m=re.search(
-            r'(.*/)(\d+),_360p\.mp4,\.mp4,_720p\.mp4,',
-            url
-        )
-
-        if m:
-
-            base=m.group(1)
-            vid=m.group(2)
-
-            candidates=[
-
-                f"{base}{vid}_720p.mp4/index-v1-a1.m3u8",
-                f"{base}{vid}.mp4/index-v1-a1.m3u8",
-                f"{base}{vid}_360p.mp4/index-v1-a1.m3u8"
-
-            ]
-
-            for c in candidates:
-                print(c)
-
-        else:
-            print(original)
-        PY
-
-    ############################################################
-    # MAIN DOWNLOAD
-    ############################################################
-
-    - name: Download videos
-      run: |
-
-        mkdir -p downloads
-
-        while IFS= read -r URL
-        do
-
-        (
-          echo "======================================"
-          echo "PROCESSING: $URL"
-          echo "======================================"
-
-          TS=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
-
-          DIR="downloads/$TS"
-
-          mkdir -p "$DIR"
-
-          ######################################################
-          # STEP 1 - TRY NORMAL YT-DLP
-          ######################################################
-
-          echo "STEP 1: NORMAL EXTRACTION"
-
-          yt-dlp \
-            --no-playlist \
-            --extractor-retries 20 \
-            --fragment-retries 50 \
-            --retries 50 \
-            --concurrent-fragments 8 \
-            --user-agent "Mozilla/5.0" \
-            --merge-output-format mp4 \
-            --format-sort "res:1080,fps,vcodec:h264" \
-            -f "bestvideo[height<=1080]+bestaudio/best[height<=1080]" \
-            -o "$DIR/%(title).150s_%(id)s.%(ext)s" \
-            "$URL" || true
-
-          ######################################################
-          # CHECK RESULT
-          ######################################################
-
-          FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
-
-          VALID=0
-
-          if [ ! -z "$FILE" ]; then
-
-            SIZE=$(stat -c%s "$FILE")
-
-            echo "FOUND FILE SIZE=$SIZE"
-
-            if [ "$SIZE" -gt 5000000 ]; then
-              VALID=1
             fi
 
-          fi
-
-          ######################################################
-          # HARD MODE
-          ######################################################
-
-          if [ $VALID -eq 0 ]; then
-
-            echo "STEP 2: HARD MODE"
-
-            rm -f "$DIR"/*.mp4 || true
-
             ##################################################
-            # INTERCEPT TRAFFIC
+            # HARD MODE
             ##################################################
 
-            python3 interceptor.py "$URL" > "$DIR/data.json"
+            if [ $VALID -eq 0 ]; then
 
-            ##################################################
-            # EXPORT COOKIES
-            ##################################################
+              echo "ENTERING HARD MODE"
 
-            cat "$DIR/data.json" \
-            | jq -r '.cookies[] |
-            "\(.domain)\tTRUE\t/\tFALSE\t0\t\(.name)\t\(.value)"' \
-            > "$DIR/cookies.txt"
+              rm -f "$DIR"/*.mp4 || true
 
-            ##################################################
-            # EXTRACT RAW URLS
-            ##################################################
-
-            cat "$DIR/data.json" \
-            | jq -r '.media[].url' \
-            | sort -u \
-            > "$DIR/raw_urls.txt"
-
-            ##################################################
-            # NORMALIZE STREAMS
-            ##################################################
-
-            touch "$DIR/all_streams.txt"
-
-            while read U
-            do
-
-              [ -z "$U" ] && continue
-
-              python3 normalize.py "$U" \
-              >> "$DIR/all_streams.txt"
-
-            done < "$DIR/raw_urls.txt"
-
-            sort -u "$DIR/all_streams.txt" \
-            > "$DIR/streams.txt"
-
-            ##################################################
-            # FILTER VALID STREAMS
-            ##################################################
-
-            grep -Ei '\.m3u8' "$DIR/streams.txt" \
-            | grep -viE 'preview|sprite|thumb|ads|trailer' \
-            > "$DIR/m3u8.txt" || true
-
-            ##################################################
-            # TEST STREAMS
-            ##################################################
-
-            SUCCESS=0
-
-            while read M
-            do
-
-              [ -z "$M" ] && continue
-
-              echo "================================="
-              echo "TESTING STREAM"
-              echo "$M"
-              echo "================================="
+              python3 interceptor.py "$URL" > "$DIR/data.json"
 
               ################################################
-              # VERIFY PLAYLIST
+              # COOKIES
               ################################################
 
-              curl \
-                -L \
-                -A "Mozilla/5.0" \
-                --connect-timeout 20 \
-                --max-time 60 \
-                "$M" \
-                -o "$DIR/test.m3u8" || continue
+              echo '# Netscape HTTP Cookie File' > "$DIR/cookies.txt"
+
+              cat "$DIR/data.json" | jq -r '
+                .cookies[] |
+                [
+                  (
+                    if (.domain | startswith(".")) then
+                      .domain
+                    else
+                      "." + .domain
+                    end
+                  ),
+                  "TRUE",
+                  .path,
+                  (
+                    if .secure then
+                      "TRUE"
+                    else
+                      "FALSE"
+                    end
+                  ),
+                  (
+                    if .expires then
+                      (.expires | floor | tostring)
+                    else
+                      "0"
+                    end
+                  ),
+                  .name,
+                  .value
+                ] | @tsv
+              ' >> "$DIR/cookies.txt"
 
               ################################################
-              # CHECK CONTENT
+              # RAW URLS
               ################################################
 
-              if ! grep -q "#EXTM3U" "$DIR/test.m3u8"; then
-                echo "NOT M3U8"
-                continue
-              fi
+              cat "$DIR/data.json" \
+                | jq -r '.media[].url' \
+                | sort -u \
+                > "$DIR/raw.txt"
 
               ################################################
-              # DETECT QUALITY
+              # REAL M3U8 ONLY
               ################################################
 
-              if grep -q "RESOLUTION=1280x720" "$DIR/test.m3u8"; then
-                echo "720P STREAM FOUND"
-              fi
+              grep -Ei \
+                '/media/.+/.+/.+\.mp4/index-.*\.m3u8' \
+                "$DIR/raw.txt" \
+                > "$DIR/real_m3u8.txt" || true
 
-              if grep -q "RESOLUTION=1920x1080" "$DIR/test.m3u8"; then
-                echo "1080P STREAM FOUND"
-              fi
+              cp "$DIR/real_m3u8.txt" \
+                "$DIR/final_streams.txt"
 
               ################################################
-              # DOWNLOAD STREAM
+              # BUILD HIGHER QUALITIES
               ################################################
 
-              yt-dlp \
-                --cookies "$DIR/cookies.txt" \
-                --referer "$URL" \
-                --user-agent "Mozilla/5.0" \
-                --extractor-retries 30 \
-                --fragment-retries 100 \
-                --retries 100 \
-                --skip-unavailable-fragments \
-                --hls-use-mpegts \
-                --concurrent-fragments 10 \
-                --merge-output-format mp4 \
-                -f "bestvideo+bestaudio/best" \
-                -o "$DIR/final.%(ext)s" \
-                "$M"
-
-              FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
-
-              if [ ! -z "$FILE" ]; then
-
-                SIZE=$(stat -c%s "$FILE")
-
-                echo "DOWNLOADED SIZE=$SIZE"
-
-                if [ "$SIZE" -gt 5000000 ]; then
-
-                  echo "SUCCESS"
-                  SUCCESS=1
-                  break
-
-                fi
-
-              fi
-
-            done < "$DIR/m3u8.txt"
-
-            ##################################################
-            # DIRECT FFMPEG FALLBACK
-            ##################################################
-
-            if [ $SUCCESS -eq 0 ]; then
-
-              echo "STEP 3: FFMPEG FALLBACK"
-
-              while read M
+              while IFS= read -r M
               do
 
                 [ -z "$M" ] && continue
 
-                ffmpeg \
-                  -headers "Referer: $URL" \
-                  -user_agent "Mozilla/5.0" \
-                  -i "$M" \
-                  -c copy \
-                  -bsf:a aac_adtstoasc \
-                  "$DIR/ffmpeg_output.mp4" \
-                  -y || true
+                echo "$M" \
+                  | sed 's/_360p\.mp4/_720p.mp4/g' \
+                  >> "$DIR/final_streams.txt"
 
-                FILE="$DIR/ffmpeg_output.mp4"
+                echo "$M" \
+                  | sed 's/_360p\.mp4/_1080p.mp4/g' \
+                  >> "$DIR/final_streams.txt"
 
-                if [ -f "$FILE" ]; then
+              done < "$DIR/real_m3u8.txt"
 
-                  SIZE=$(stat -c%s "$FILE")
+              sort -u "$DIR/final_streams.txt" \
+                -o "$DIR/final_streams.txt"
+
+              ################################################
+              # DOWNLOAD STREAMS
+              ################################################
+
+              SUCCESS=0
+
+              while IFS= read -r M
+              do
+
+                [ -z "$M" ] && continue
+
+                echo "TESTING: $M"
+
+                curl \
+                  -L \
+                  --connect-timeout 30 \
+                  --max-time 60 \
+                  -A "Mozilla/5.0" \
+                  "$M" \
+                  -o "$DIR/test.m3u8" || continue
+
+                if ! grep -q "#EXTM3U" "$DIR/test.m3u8"; then
+                  echo "INVALID M3U8"
+                  continue
+                fi
+
+                yt-dlp \
+                  --cookies "$DIR/cookies.txt" \
+                  --add-header "Referer:$URL" \
+                  --add-header "Origin:https://hello.porn" \
+                  --user-agent "Mozilla/5.0" \
+                  --concurrent-fragments 10 \
+                  --fragment-retries 100 \
+                  --retries 100 \
+                  --hls-prefer-native \
+                  --no-part \
+                  --continue \
+                  --merge-output-format mp4 \
+                  -o "$DIR/final_%(height)sp.%(ext)s" \
+                  "$M" || true
+
+                DOWNLOADED=$(find "$DIR" -iname "final_*" | head -n1 || true)
+
+                if [ ! -z "$DOWNLOADED" ]; then
+
+                  SIZE=$(stat -c%s "$DOWNLOADED")
 
                   if [ "$SIZE" -gt 5000000 ]; then
                     SUCCESS=1
@@ -472,88 +304,31 @@ jobs:
 
                 fi
 
-              done < "$DIR/m3u8.txt"
+              done < "$DIR/final_streams.txt"
 
             fi
 
-          fi
+            ##################################################
+            # CLEANUP
+            ##################################################
 
-          ######################################################
-          # FINAL VALIDATION
-          ######################################################
+            find "$DIR" -type f -size -2M -delete || true
 
-          FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
+            cd "$DIR"
 
-          if [ ! -z "$FILE" ]; then
+            7z a result.7z ./*
 
-            echo "FINAL VALIDATION"
+            cd - >/dev/null
 
-            mediainfo "$FILE" \
-            > "$DIR/media_info.txt" || true
+          done < urls.txt
 
-            SIZE=$(stat -c%s "$FILE")
+      ########################################################
+      # ARTIFACT
+      ########################################################
 
-            DURATION=$(mediainfo \
-              --Inform="General;%Duration%" \
-              "$FILE" || echo 0)
-
-            echo "SIZE=$SIZE"
-            echo "DURATION=$DURATION"
-
-            if [ "$SIZE" -lt 5000000 ]; then
-
-              echo "BAD FILE REMOVED"
-
-              rm -f "$FILE"
-
-            fi
-
-          fi
-
-          ######################################################
-          # SPLIT LARGE FILES
-          ######################################################
-
-          FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
-
-          if [ ! -z "$FILE" ]; then
-
-            SIZE=$(stat -c%s "$FILE")
-
-            if [ "$SIZE" -gt 95000000 ]; then
-
-              echo "SPLITTING LARGE FILE"
-
-              7z a \
-                -v90m \
-                "$DIR/video.7z" \
-                "$FILE"
-
-              rm -f "$FILE"
-
-            fi
-
-          fi
-
-        ) &
-
-        done < urls.txt
-
-        wait
-
-    ############################################################
-    # PUSH RESULTS
-    ############################################################
-
-    - name: Upload downloaded files
-      run: |
-
-        git config user.name github-actions
-        git config user.email github-actions@github.com
-
-        git add downloads
-
-        git commit -m "downloaded videos" \
-        || echo "nothing to commit"
-
-        git push
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloaded-videos
+          path: downloads/**/result.7z
+          if-no-files-found: warn
