@@ -1,4 +1,4 @@
-name: Ultimate Video Downloader V4
+name: Ultimate Video Downloader V5
 
 on:
   workflow_dispatch:
@@ -29,6 +29,10 @@ jobs:
 
     steps:
 
+    ############################################################
+    # CHECKOUT
+    ############################################################
+
     - uses: actions/checkout@v4
 
     ############################################################
@@ -42,17 +46,18 @@ jobs:
 
         pip install \
           yt-dlp \
-          playwright
+          playwright \
+          requests
 
         sudo apt-get update
 
         sudo apt-get install -y \
           ffmpeg \
           jq \
-          wget \
           curl \
-          p7zip-full \
-          mediainfo
+          wget \
+          mediainfo \
+          p7zip-full
 
         playwright install chromium
 
@@ -77,58 +82,43 @@ jobs:
     # PLAYWRIGHT INTERCEPTOR
     ############################################################
 
-    - name: Create advanced interceptor
+    - name: Create interceptor
       run: |
 
         cat > interceptor.py << 'PY'
         import json
-        import time
         import sys
         from playwright.sync_api import sync_playwright
 
-        TARGET=sys.argv[1]
+        target=sys.argv[1]
 
-        media=[]
-        xhrs=[]
+        found=[]
 
-        BAD_WORDS=[
+        BAD=[
             "ads",
             "doubleclick",
-            "jerkmate",
-            "adtng",
+            "analytics",
             "banner",
             "sprite",
             "thumb",
             "preview",
             "trailer",
-            "analytics"
+            "logo"
         ]
 
-        GOOD_WORDS=[
-            ".m3u8",
-            ".mp4",
-            ".mpd",
-            "videoplayback",
-            "manifest"
-        ]
-
-        def is_bad(url):
+        def bad(url):
             u=url.lower()
-            return any(x in u for x in BAD_WORDS)
-
-        def is_good(url):
-            u=url.lower()
-            return any(x in u for x in GOOD_WORDS)
+            return any(x in u for x in BAD)
 
         with sync_playwright() as p:
 
-            browser = p.chromium.launch(
+            browser=p.chromium.launch(
                 headless=True
             )
 
-            context = browser.new_context(
+            context=browser.new_context(
                 viewport={"width":1920,"height":1080},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36"
+                user_agent="Mozilla/5.0"
             )
 
             page=context.new_page()
@@ -138,21 +128,23 @@ jobs:
                 try:
 
                     url=r.url
-                    headers=r.headers
-                    ctype=headers.get("content-type","")
+                    ct=r.headers.get("content-type","")
 
-                    item={
-                        "url":url,
-                        "content_type":ctype
-                    }
-
-                    xhrs.append(item)
-
-                    if is_bad(url):
+                    if bad(url):
                         return
 
-                    if is_good(url) or "video" in ctype or "mpegurl" in ctype:
-                        media.append(item)
+                    if (
+                        ".m3u8" in url
+                        or ".mp4" in url
+                        or "mpegurl" in ct
+                        or "video" in ct
+                        or "manifest" in url
+                    ):
+
+                        found.append({
+                            "url":url,
+                            "content_type":ct
+                        })
 
                 except:
                     pass
@@ -160,7 +152,7 @@ jobs:
             page.on("response", on_response)
 
             page.goto(
-                TARGET,
+                target,
                 timeout=120000,
                 wait_until="networkidle"
             )
@@ -179,22 +171,66 @@ jobs:
 
             cookies=context.cookies()
 
-            result={
-                "media":media,
-                "xhrs":xhrs,
+            print(json.dumps({
+                "media":found,
                 "cookies":cookies
-            }
-
-            print(json.dumps(result))
+            }))
 
             browser.close()
         PY
 
     ############################################################
-    # MAIN
+    # NORMALIZER
     ############################################################
 
-    - name: Download
+    - name: Create stream normalizer
+      run: |
+
+        cat > normalize.py << 'PY'
+        import re
+        import sys
+
+        url=sys.argv[1]
+
+        original=url
+
+        # REMOVE SPACES
+        url=url.strip()
+
+        # REMOVE DUPLICATES
+        url=url.replace(",,",",")
+
+        # HELLO.PORN HYBRID PLAYLIST
+        m=re.search(
+            r'(.*/)(\d+),_360p\.mp4,\.mp4,_720p\.mp4,',
+            url
+        )
+
+        if m:
+
+            base=m.group(1)
+            vid=m.group(2)
+
+            candidates=[
+
+                f"{base}{vid}_720p.mp4/index-v1-a1.m3u8",
+                f"{base}{vid}.mp4/index-v1-a1.m3u8",
+                f"{base}{vid}_360p.mp4/index-v1-a1.m3u8"
+
+            ]
+
+            for c in candidates:
+                print(c)
+
+        else:
+            print(original)
+        PY
+
+    ############################################################
+    # MAIN DOWNLOAD
+    ############################################################
+
+    - name: Download videos
       run: |
 
         mkdir -p downloads
@@ -203,9 +239,9 @@ jobs:
         do
 
         (
-          echo "=================================="
-          echo "PROCESSING $URL"
-          echo "=================================="
+          echo "======================================"
+          echo "PROCESSING: $URL"
+          echo "======================================"
 
           TS=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
 
@@ -214,180 +250,262 @@ jobs:
           mkdir -p "$DIR"
 
           ######################################################
-          # FIRST TRY YT-DLP
+          # STEP 1 - TRY NORMAL YT-DLP
           ######################################################
 
-          echo "NORMAL EXTRACTION"
+          echo "STEP 1: NORMAL EXTRACTION"
 
           yt-dlp \
             --no-playlist \
-            --extractor-retries 10 \
-            --fragment-retries 20 \
-            --retries 20 \
+            --extractor-retries 20 \
+            --fragment-retries 50 \
+            --retries 50 \
             --concurrent-fragments 8 \
             --user-agent "Mozilla/5.0" \
             --merge-output-format mp4 \
-            --format-sort "res:1080,fps,hdr:12,vcodec:h264" \
+            --format-sort "res:1080,fps,vcodec:h264" \
             -f "bestvideo[height<=1080]+bestaudio/best[height<=1080]" \
-            -o "$DIR/%(title).120s_%(id)s.%(ext)s" \
+            -o "$DIR/%(title).150s_%(id)s.%(ext)s" \
             "$URL" || true
 
-          FILE=$(find "$DIR" -iname "*.mp4" | head -n1 || true)
+          ######################################################
+          # CHECK RESULT
+          ######################################################
 
-          SIZE=0
+          FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
+
+          VALID=0
 
           if [ ! -z "$FILE" ]; then
+
             SIZE=$(stat -c%s "$FILE")
+
+            echo "FOUND FILE SIZE=$SIZE"
+
+            if [ "$SIZE" -gt 5000000 ]; then
+              VALID=1
+            fi
+
           fi
 
           ######################################################
           # HARD MODE
           ######################################################
 
-          if [ -z "$FILE" ] || [ "$SIZE" -lt 5000000 ]; then
+          if [ $VALID -eq 0 ]; then
 
-            echo "ENTER HARD MODE"
+            echo "STEP 2: HARD MODE"
 
             rm -f "$DIR"/*.mp4 || true
 
             ##################################################
-            # CAPTURE
+            # INTERCEPT TRAFFIC
             ##################################################
 
             python3 interceptor.py "$URL" > "$DIR/data.json"
 
             ##################################################
-            # COOKIES
+            # EXPORT COOKIES
             ##################################################
 
             cat "$DIR/data.json" \
-              | jq -r '.cookies[] |
-              "\(.domain)\tTRUE\t/\tFALSE\t0\t\(.name)\t\(.value)"' \
-              > "$DIR/cookies.txt"
+            | jq -r '.cookies[] |
+            "\(.domain)\tTRUE\t/\tFALSE\t0\t\(.name)\t\(.value)"' \
+            > "$DIR/cookies.txt"
 
             ##################################################
-            # ALL URLS
+            # EXTRACT RAW URLS
             ##################################################
 
             cat "$DIR/data.json" \
-              | jq -r '.media[].url' \
-              | sort -u \
-              > "$DIR/all_media.txt"
+            | jq -r '.media[].url' \
+            | sort -u \
+            > "$DIR/raw_urls.txt"
 
             ##################################################
-            # DRM DETECTION
+            # NORMALIZE STREAMS
             ##################################################
 
-            if grep -Ei 'widevine|drm|fairplay|license' "$DIR/all_media.txt"
-            then
-              echo "DRM DETECTED" > "$DIR/DRM.txt"
-            fi
+            touch "$DIR/all_streams.txt"
+
+            while read U
+            do
+
+              [ -z "$U" ] && continue
+
+              python3 normalize.py "$U" \
+              >> "$DIR/all_streams.txt"
+
+            done < "$DIR/raw_urls.txt"
+
+            sort -u "$DIR/all_streams.txt" \
+            > "$DIR/streams.txt"
 
             ##################################################
-            # FILTER STREAMS
+            # FILTER VALID STREAMS
             ##################################################
 
-            grep -Ei '\.m3u8|manifest' "$DIR/all_media.txt" \
-              | grep -viE 'preview|trailer|clip|sprite|thumb|ads' \
-              > "$DIR/m3u8.txt" || true
+            grep -Ei '\.m3u8' "$DIR/streams.txt" \
+            | grep -viE 'preview|sprite|thumb|ads|trailer' \
+            > "$DIR/m3u8.txt" || true
 
-            grep -Ei '\.mp4' "$DIR/all_media.txt" \
-              | grep -viE 'preview|trailer|clip|sprite|thumb|ads' \
-              > "$DIR/mp4.txt" || true
+            ##################################################
+            # TEST STREAMS
+            ##################################################
 
             SUCCESS=0
-
-            ##################################################
-            # TEST M3U8 STREAMS
-            ##################################################
 
             while read M
             do
 
               [ -z "$M" ] && continue
 
-              echo "TEST STREAM $M"
+              echo "================================="
+              echo "TESTING STREAM"
+              echo "$M"
+              echo "================================="
 
-              yt-dlp \
-                --cookies "$DIR/cookies.txt" \
-                --referer "$URL" \
-                --dump-json \
+              ################################################
+              # VERIFY PLAYLIST
+              ################################################
+
+              curl \
+                -L \
+                -A "Mozilla/5.0" \
+                --connect-timeout 20 \
+                --max-time 60 \
                 "$M" \
-                > "$DIR/info.json" 2>/dev/null || continue
+                -o "$DIR/test.m3u8" || continue
 
-              DUR=$(cat "$DIR/info.json" | jq '.duration // 0')
+              ################################################
+              # CHECK CONTENT
+              ################################################
 
-              echo "DURATION=$DUR"
-
-              if [ "$DUR" -lt 1200 ]; then
-                echo "SKIP SHORT STREAM"
+              if ! grep -q "#EXTM3U" "$DIR/test.m3u8"; then
+                echo "NOT M3U8"
                 continue
               fi
 
-              echo "DOWNLOAD FULL STREAM"
+              ################################################
+              # DETECT QUALITY
+              ################################################
+
+              if grep -q "RESOLUTION=1280x720" "$DIR/test.m3u8"; then
+                echo "720P STREAM FOUND"
+              fi
+
+              if grep -q "RESOLUTION=1920x1080" "$DIR/test.m3u8"; then
+                echo "1080P STREAM FOUND"
+              fi
+
+              ################################################
+              # DOWNLOAD STREAM
+              ################################################
 
               yt-dlp \
                 --cookies "$DIR/cookies.txt" \
                 --referer "$URL" \
                 --user-agent "Mozilla/5.0" \
+                --extractor-retries 30 \
+                --fragment-retries 100 \
+                --retries 100 \
+                --skip-unavailable-fragments \
                 --hls-use-mpegts \
-                --extractor-retries 20 \
-                --fragment-retries 50 \
-                --retries 50 \
                 --concurrent-fragments 10 \
                 --merge-output-format mp4 \
-                --format-sort "res:1080,fps,vcodec:h264" \
-                -f "bestvideo[height<=1080]+bestaudio/best[height<=1080]" \
-                -o "$DIR/full.%(ext)s" \
-                "$M" && SUCCESS=1 && break
+                -f "bestvideo+bestaudio/best" \
+                -o "$DIR/final.%(ext)s" \
+                "$M"
+
+              FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
+
+              if [ ! -z "$FILE" ]; then
+
+                SIZE=$(stat -c%s "$FILE")
+
+                echo "DOWNLOADED SIZE=$SIZE"
+
+                if [ "$SIZE" -gt 5000000 ]; then
+
+                  echo "SUCCESS"
+                  SUCCESS=1
+                  break
+
+                fi
+
+              fi
 
             done < "$DIR/m3u8.txt"
 
             ##################################################
-            # MP4 FALLBACK
+            # DIRECT FFMPEG FALLBACK
             ##################################################
 
             if [ $SUCCESS -eq 0 ]; then
+
+              echo "STEP 3: FFMPEG FALLBACK"
 
               while read M
               do
 
                 [ -z "$M" ] && continue
 
-                echo "TRY MP4 $M"
+                ffmpeg \
+                  -headers "Referer: $URL" \
+                  -user_agent "Mozilla/5.0" \
+                  -i "$M" \
+                  -c copy \
+                  -bsf:a aac_adtstoasc \
+                  "$DIR/ffmpeg_output.mp4" \
+                  -y || true
 
-                wget \
-                  --load-cookies "$DIR/cookies.txt" \
-                  --referer="$URL" \
-                  --user-agent="Mozilla/5.0" \
-                  -O "$DIR/video.mp4" \
-                  "$M" && SUCCESS=1 && break
+                FILE="$DIR/ffmpeg_output.mp4"
 
-              done < "$DIR/mp4.txt"
+                if [ -f "$FILE" ]; then
+
+                  SIZE=$(stat -c%s "$FILE")
+
+                  if [ "$SIZE" -gt 5000000 ]; then
+                    SUCCESS=1
+                    break
+                  fi
+
+                fi
+
+              done < "$DIR/m3u8.txt"
 
             fi
 
           fi
 
           ######################################################
-          # VALIDATION
+          # FINAL VALIDATION
           ######################################################
 
-          FILE=$(find "$DIR" -iname "*.mp4" | head -n1 || true)
+          FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
 
           if [ ! -z "$FILE" ]; then
 
-            echo "VALIDATE FILE"
+            echo "FINAL VALIDATION"
 
-            mediainfo "$FILE" > "$DIR/media_info.txt" || true
+            mediainfo "$FILE" \
+            > "$DIR/media_info.txt" || true
 
             SIZE=$(stat -c%s "$FILE")
 
+            DURATION=$(mediainfo \
+              --Inform="General;%Duration%" \
+              "$FILE" || echo 0)
+
             echo "SIZE=$SIZE"
+            echo "DURATION=$DURATION"
 
             if [ "$SIZE" -lt 5000000 ]; then
-              echo "BAD FILE"
+
+              echo "BAD FILE REMOVED"
+
               rm -f "$FILE"
+
             fi
 
           fi
@@ -396,7 +514,7 @@ jobs:
           # SPLIT LARGE FILES
           ######################################################
 
-          FILE=$(find "$DIR" -iname "*.mp4" | head -n1 || true)
+          FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
 
           if [ ! -z "$FILE" ]; then
 
@@ -404,11 +522,14 @@ jobs:
 
             if [ "$SIZE" -gt 95000000 ]; then
 
-              echo "SPLIT LARGE FILE"
+              echo "SPLITTING LARGE FILE"
 
-              7z a -v90m "$DIR/video.7z" "$FILE"
+              7z a \
+                -v90m \
+                "$DIR/video.7z" \
+                "$FILE"
 
-              rm "$FILE"
+              rm -f "$FILE"
 
             fi
 
@@ -421,10 +542,10 @@ jobs:
         wait
 
     ############################################################
-    # SAVE
+    # PUSH RESULTS
     ############################################################
 
-    - name: Commit files
+    - name: Upload downloaded files
       run: |
 
         git config user.name github-actions
@@ -432,6 +553,7 @@ jobs:
 
         git add downloads
 
-        git commit -m "downloaded videos" || echo "nothing"
+        git commit -m "downloaded videos" \
+        || echo "nothing to commit"
 
         git push
