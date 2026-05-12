@@ -6,23 +6,18 @@ on:
       url1:
         description: "Video URL 1"
         required: false
-        type: string
       url2:
         description: "Video URL 2"
         required: false
-        type: string
       url3:
         description: "Video URL 3"
         required: false
-        type: string
       url4:
         description: "Video URL 4"
         required: false
-        type: string
       url5:
         description: "Video URL 5"
         required: false
-        type: string
 
 permissions:
   contents: write
@@ -34,33 +29,23 @@ jobs:
 
     steps:
 
-    - name: Checkout
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-    - name: Install dependencies
+    - name: Install tools
       run: |
 
         python3 -m pip install --upgrade pip
-
-        pip install \
-          yt-dlp \
-          playwright
+        pip install yt-dlp playwright
 
         sudo apt-get update
-
-        sudo apt-get install -y \
-          ffmpeg \
-          wget \
-          curl \
-          jq \
-          p7zip-full
+        sudo apt-get install -y ffmpeg wget jq p7zip-full curl
 
         playwright install chromium
 
     - name: Prepare URLs
       run: |
 
-        cat > urls.txt << EOF
+        cat > urls.txt <<EOF
         ${{ github.event.inputs.url1 }}
         ${{ github.event.inputs.url2 }}
         ${{ github.event.inputs.url3 }}
@@ -70,112 +55,74 @@ jobs:
 
         sed -i '/^$/d' urls.txt
 
-    - name: Create HARD extractor
+    - name: Create network interceptor
       run: |
 
-        cat > hard_extract.py << 'PY'
+        cat > intercept.py << 'PY'
         import sys
         import json
         from playwright.sync_api import sync_playwright
 
-        url = sys.argv[1]
-
-        found = []
+        url=sys.argv[1]
+        media=[]
 
         def valid(u):
-            bad = [
-                ".jpg",
-                ".jpeg",
-                ".png",
-                ".gif",
-                ".css",
-                ".js",
-                "logo",
-                "banner"
-            ]
+            good=[".mp4",".m3u8",".mpd","videoplayback","manifest"]
+            bad=[".jpg",".png",".gif",".css",".js",".svg"]
 
             for b in bad:
                 if b in u.lower():
                     return False
 
-            good = [
-                ".mp4",
-                ".m3u8",
-                ".mpd",
-                "videoplayback",
-                "manifest"
-            ]
+            for g in good:
+                if g in u.lower():
+                    return True
 
-            return any(g in u.lower() for g in good)
+            return False
 
         with sync_playwright() as p:
 
-            browser = p.chromium.launch(
-                headless=True
-            )
+            browser=p.chromium.launch(headless=True)
+            page=browser.new_page()
 
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 720}
-            )
-
-            page = context.new_page()
-
-            def handle_response(response):
-
+            def resp(r):
                 try:
-                    u = response.url
+                    u=r.url
+                    ct=r.headers.get("content-type","")
 
-                    ct = response.headers.get("content-type", "")
-
-                    if valid(u) or "video" in ct:
-                        found.append({
-                            "url": u,
-                            "content_type": ct
+                    if valid(u) or "video" in ct or "mpegurl" in ct:
+                        media.append({
+                            "url":u,
+                            "type":ct
                         })
-
                 except:
                     pass
 
-            page.on("response", handle_response)
+            page.on("response",resp)
+
+            page.goto(url,timeout=90000,wait_until="networkidle")
 
             try:
+                page.locator("video").click(timeout=5000)
+            except:
+                pass
 
-                page.goto(
-                    url,
-                    wait_until="networkidle",
-                    timeout=90000
-                )
-
-                page.wait_for_timeout(12000)
-
-                try:
-                    page.locator("video").click(timeout=5000)
-                except:
-                    pass
-
-                page.wait_for_timeout(10000)
-
-            except Exception as e:
-                print("ERROR:", e)
+            page.wait_for_timeout(15000)
 
             browser.close()
 
-        unique = []
+        uniq=[]
+        seen=set()
 
-        seen = set()
+        for m in media:
+            if m["url"] not in seen:
+                seen.add(m["url"])
+                uniq.append(m)
 
-        for item in found:
-
-            u = item["url"]
-
-            if u not in seen:
-                seen.add(u)
-                unique.append(item)
-
-        print(json.dumps(unique, indent=2))
+        print(json.dumps(uniq))
         PY
 
-    - name: Download
+    - name: Download videos
       run: |
 
         mkdir -p downloads
@@ -183,143 +130,154 @@ jobs:
         while IFS= read -r URL
         do
 
-          echo "=============================="
-          echo "URL: $URL"
-          echo "=============================="
-
           (
-            TS=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
+          echo "PROCESSING $URL"
 
-            DIR="downloads/$TS"
+          TS=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
+          DIR="downloads/$TS"
+          mkdir -p "$DIR"
 
-            mkdir -p "$DIR"
+          ################################
+          # STEP 1 yt-dlp
+          ################################
 
-            ############################################
-            # STEP 1
-            # NORMAL YT-DLP
-            ############################################
+          echo "STEP1 yt-dlp"
 
-            echo "STEP 1: yt-dlp"
+          yt-dlp \
+            --no-playlist \
+            -f "bestvideo+bestaudio/best" \
+            --merge-output-format mp4 \
+            --retries 10 \
+            --fragment-retries 10 \
+            --concurrent-fragments 4 \
+            -o "$DIR/%(title).120s_%(id)s.%(ext)s" \
+            "$URL" || true
 
-            yt-dlp \
-              --no-playlist \
-              -f "bestvideo+bestaudio/best" \
-              --merge-output-format mp4 \
-              --retries 10 \
-              --fragment-retries 10 \
-              --concurrent-fragments 4 \
-              -o "$DIR/%(title).120s_%(id)s.%(ext)s" \
-              "$URL" || true
+          FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
 
-            FILE=$(find "$DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" \) | head -n 1 || true)
+          SIZE=0
 
-            SIZE=0
+          if [ ! -z "$FILE" ]; then
+            SIZE=$(stat -c%s "$FILE")
+          fi
 
-            if [ ! -z "$FILE" ]; then
-              SIZE=$(stat -c%s "$FILE")
-            fi
+          ################################
+          # HARD MODE
+          ################################
 
-            ############################################
-            # CHECK FAILED / TINY FILE
-            ############################################
+          if [ -z "$FILE" ] || [ $SIZE -lt 1000000 ]; then
 
-            if [ -z "$FILE" ] || [ $SIZE -lt 1000000 ]; then
+            echo "START HARD MODE"
 
-              echo "yt-dlp failed or tiny file"
-              echo "STARTING HARD MODE"
+            rm -f "$DIR"/* || true
 
-              rm -f "$DIR"/* || true
+            python3 intercept.py "$URL" > "$DIR/media.json"
 
-              ##########################################
-              # STEP 2
-              # NETWORK INTERCEPTION
-              ##########################################
+            echo "MEDIA FOUND"
+            cat "$DIR/media.json"
 
-              python3 hard_extract.py "$URL" > "$DIR/media.json"
+            ################################
+            # FILTER MEDIA
+            ################################
 
-              echo "FOUND MEDIA:"
-              cat "$DIR/media.json"
+            cat "$DIR/media.json" \
+            | jq -r '.[].url' \
+            | grep -vE 'adtng|doubleclick|jerkmate|amateur\.tv|creative|banner|ads' \
+            > "$DIR/all.txt"
 
-              ##########################################
-              # PICK BEST URL
-              ##########################################
+            ################################
+            # TRY M3U8 FIRST
+            ################################
 
-              MEDIA=$(cat "$DIR/media.json" \
-                | jq -r '.[].url' \
-                | grep -Ei '\.m3u8|\.mp4|manifest|videoplayback' \
-                | tail -n 1)
+            grep '\.m3u8' "$DIR/all.txt" > "$DIR/m3u8.txt" || true
 
-              echo "SELECTED:"
-              echo "$MEDIA"
+            SUCCESS=0
 
-              ##########################################
-              # STEP 3
-              # DOWNLOAD REAL STREAM
-              ##########################################
+            while read M
+            do
 
-              if [[ "$MEDIA" == *".m3u8"* ]]; then
+              if [ -z "$M" ]; then
+                continue
+              fi
 
-                echo "Downloading HLS stream..."
+              echo "TRY HLS $M"
 
-                yt-dlp \
-                  --referer "$URL" \
-                  -f "best" \
-                  --merge-output-format mp4 \
-                  -o "$DIR/hardmode.%(ext)s" \
-                  "$MEDIA" || true
+              yt-dlp \
+                --referer "$URL" \
+                -f best \
+                --merge-output-format mp4 \
+                -o "$DIR/stream.%(ext)s" \
+                "$M" && SUCCESS=1 && break
 
-              elif [ ! -z "$MEDIA" ]; then
+            done < "$DIR/m3u8.txt"
 
-                echo "Downloading direct media..."
+            ################################
+            # TRY MP4
+            ################################
+
+            if [ $SUCCESS -eq 0 ]; then
+
+              grep '\.mp4' "$DIR/all.txt" > "$DIR/mp4.txt" || true
+
+              while read M
+              do
+
+                if [ -z "$M" ]; then
+                  continue
+                fi
+
+                echo "TRY MP4 $M"
 
                 wget \
                   --referer="$URL" \
                   --user-agent="Mozilla/5.0" \
-                  -O "$DIR/hardmode.mp4" \
-                  "$MEDIA" || true
-              fi
+                  -O "$DIR/video.mp4" \
+                  "$M" && SUCCESS=1 && break
 
-              FILE=$(find "$DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" \) | head -n 1 || true)
-
-            fi
-
-            ############################################
-            # FINAL VALIDATION
-            ############################################
-
-            if [ -f "$FILE" ]; then
-
-              FINALSIZE=$(stat -c%s "$FILE")
-
-              echo "FINAL SIZE:"
-              echo "$FINALSIZE"
-
-              if [ $FINALSIZE -lt 1000000 ]; then
-                echo "Still tiny. Marking failed."
-                rm -f "$FILE"
-              fi
+              done < "$DIR/mp4.txt"
 
             fi
 
-            ############################################
-            # SPLIT LARGE FILES
-            ############################################
+          fi
 
-            FILE=$(find "$DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" \) | head -n 1 || true)
+          ################################
+          # VALIDATE FILE
+          ################################
 
-            if [ ! -z "$FILE" ]; then
+          FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
 
-              FINALSIZE=$(stat -c%s "$FILE")
+          if [ ! -z "$FILE" ]; then
 
-              if [ $FINALSIZE -gt 95000000 ]; then
+            SIZE=$(stat -c%s "$FILE")
 
-                echo "Splitting archive..."
+            echo "SIZE $SIZE"
 
-                7z a -v90m "$DIR/video.7z" "$FILE"
-
-                rm -f "$FILE"
-              fi
+            if [ $SIZE -lt 1000000 ]; then
+              echo "FAIL tiny"
+              rm -f "$FILE"
             fi
+          fi
+
+          ################################
+          # SPLIT BIG FILE
+          ################################
+
+          FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
+
+          if [ ! -z "$FILE" ]; then
+
+            SIZE=$(stat -c%s "$FILE")
+
+            if [ $SIZE -gt 95000000 ]; then
+
+              echo "SPLIT"
+
+              7z a -v90m "$DIR/video.7z" "$FILE"
+
+              rm "$FILE"
+
+            fi
+          fi
 
           ) &
 
@@ -327,14 +285,14 @@ jobs:
 
         wait
 
-    - name: Push results
+    - name: Commit
       run: |
 
-        git config user.name "github-actions"
-        git config user.email "github-actions@github.com"
+        git config user.name github-actions
+        git config user.email github-actions@github.com
 
         git add downloads
 
-        git commit -m "Downloaded videos" || echo "Nothing to commit"
+        git commit -m "videos downloaded" || echo nothing
 
         git push
