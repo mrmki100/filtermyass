@@ -1,4 +1,4 @@
-name: Universal Video Downloader V16 Ultimate PRO
+name: Universal Video Downloader V17 Ultra Stable
 
 on:
   workflow_dispatch:
@@ -6,11 +6,13 @@ on:
       url:
         description: "Video URL"
         required: true
+
       filename:
         description: "Custom filename"
         required: false
+
       quality:
-        description: "Quality (best/1080/720/480)"
+        description: "Quality (best/2160/1440/1080/720/480)"
         required: false
         default: "best"
 
@@ -22,8 +24,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+
   download:
+
     runs-on: ubuntu-latest
+
     timeout-minutes: 360
 
     env:
@@ -47,41 +52,47 @@ jobs:
     # PREPARE
     #######################################################################
 
-    - name: Prepare directories
+    - name: Prepare workspace
       run: |
+
+        set -Eeuo pipefail
+
         mkdir -p downloads
         mkdir -p temp
-        mkdir -p cookies
         mkdir -p logs
         mkdir -p fragments
         mkdir -p ffmpeg_temp
+        mkdir -p cookies
 
-        touch downloads/.gitkeep || true
+        touch downloads/.gitkeep
 
         echo "Workspace:"
         pwd
 
-        echo "Files:"
-        ls -la
+        echo "Directory:"
+        ls -lah
 
     #######################################################################
     # CACHE
     #######################################################################
 
-    - name: Cache temp files
+    - name: Cache fragments
       uses: actions/cache@v4
       with:
         path: |
-          temp
           fragments
+          temp
         key: downloader-${{ runner.os }}-${{ github.run_id }}
 
     #######################################################################
-    # INSTALL DEPENDENCIES
+    # INSTALL
     #######################################################################
 
     - name: Install dependencies
       run: |
+
+        set -Eeuo pipefail
+
         sudo apt-get update
 
         sudo apt-get install -y \
@@ -106,9 +117,12 @@ jobs:
 
         pip install --upgrade yt-dlp
 
-        echo "Versions:"
+        echo "Versions"
+
         yt-dlp --version
+
         ffmpeg -version | head
+
         aria2c --version | head
 
     #######################################################################
@@ -117,80 +131,82 @@ jobs:
 
     - name: Generate headers
       run: |
+
         cat > agents.txt <<EOF
-        Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137.0 Safari/537.36
-        Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 Chrome/137.0 Safari/537.36
-        Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/137.0 Safari/537.36
-        Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile Safari/604.1
-        Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/137.0 Mobile Safari/537.36
-        EOF
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137.0 Safari/537.36
+Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 Chrome/137.0 Safari/537.36
+Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/137.0 Safari/537.36
+Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile Safari/604.1
+Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/137.0 Mobile Safari/537.36
+EOF
 
         UA=$(shuf -n 1 agents.txt)
 
-        echo "UA=$UA" >> $GITHUB_ENV
-
         DOMAIN=$(echo "$URL" | awk -F/ '{print $3}')
 
+        echo "UA=$UA" >> $GITHUB_ENV
         echo "DOMAIN=$DOMAIN" >> $GITHUB_ENV
 
+        echo "Selected UA:"
+        echo "$UA"
+
     #######################################################################
-    # NETWORK DEBUG
+    # NETWORK
     #######################################################################
 
     - name: Network diagnostics
       continue-on-error: true
       run: |
+
         echo "DNS:"
-        nslookup $DOMAIN || true
+        nslookup "$DOMAIN" || true
 
         echo "HEAD REQUEST:"
-        curl -I \
+
+        curl \
+          -I \
           -L \
           --max-time 20 \
+          --retry 3 \
           -A "$UA" \
           "$URL" || true
 
     #######################################################################
-    # URL INFO
+    # DETECT TYPE
     #######################################################################
 
     - name: Detect source
       run: |
+
         echo "Input URL:"
         echo "$URL"
 
         if echo "$URL" | grep -qi "m3u8"; then
           echo "TYPE=HLS" >> $GITHUB_ENV
+
         elif echo "$URL" | grep -qi "mpd"; then
           echo "TYPE=DASH" >> $GITHUB_ENV
+
         else
           echo "TYPE=NORMAL" >> $GITHUB_ENV
         fi
 
     #######################################################################
-    # COOKIES
+    # FORMAT
     #######################################################################
 
-    - name: Create cookie jar
+    - name: Build quality selector
       run: |
-        touch cookies/cookies.txt
-
-    #######################################################################
-    # YT-DLP PRIMARY DOWNLOAD
-    #######################################################################
-
-    - name: yt-dlp main download
-      id: primary
-      continue-on-error: true
-      run: |
-
-        OUTPUT="downloads/video_%(id)s.%(ext)s"
-
-        if [ -n "$CUSTOM_NAME" ]; then
-          OUTPUT="downloads/${CUSTOM_NAME}.%(ext)s"
-        fi
 
         FORMAT="bestvideo+bestaudio/best"
+
+        if [ "$QUALITY" = "2160" ]; then
+          FORMAT="bestvideo[height<=2160]+bestaudio/best[height<=2160]"
+        fi
+
+        if [ "$QUALITY" = "1440" ]; then
+          FORMAT="bestvideo[height<=1440]+bestaudio/best[height<=1440]"
+        fi
 
         if [ "$QUALITY" = "1080" ]; then
           FORMAT="bestvideo[height<=1080]+bestaudio/best[height<=1080]"
@@ -204,38 +220,89 @@ jobs:
           FORMAT="bestvideo[height<=480]+bestaudio/best[height<=480]"
         fi
 
+        echo "FORMAT=$FORMAT" >> $GITHUB_ENV
+
+        echo "Selected format:"
+        echo "$FORMAT"
+
+    #######################################################################
+    # OUTPUT
+    #######################################################################
+
+    - name: Build output name
+      run: |
+
+        OUTPUT="downloads/video_%(id)s.%(ext)s"
+
+        if [ -n "$CUSTOM_NAME" ]; then
+          OUTPUT="downloads/${CUSTOM_NAME}.%(ext)s"
+        fi
+
+        echo "OUTPUT=$OUTPUT" >> $GITHUB_ENV
+
+        echo "Output:"
+        echo "$OUTPUT"
+
+    #######################################################################
+    # COOKIES
+    #######################################################################
+
+    - name: Prepare cookies
+      run: |
+
+        if [ -s cookies/cookies.txt ]; then
+          echo "COOKIE_ARG=--cookies cookies/cookies.txt" >> $GITHUB_ENV
+          echo "Using cookies"
+
+        else
+          echo "COOKIE_ARG=" >> $GITHUB_ENV
+          echo "No valid cookies"
+        fi
+
+    #######################################################################
+    # PRIMARY DOWNLOAD
+    #######################################################################
+
+    - name: yt-dlp main download
+      id: primary
+      continue-on-error: true
+      run: |
+
+        set -Eeuo pipefail
+
         yt-dlp \
           --verbose \
           --no-playlist \
-          --ignore-errors \
           --continue \
-          --retries 20 \
-          --fragment-retries 20 \
+          --ignore-errors \
+          --retries 30 \
+          --fragment-retries 30 \
+          --extractor-retries 30 \
+          --file-access-retries 30 \
           --retry-sleep 5 \
           --socket-timeout 60 \
-          --user-agent "$UA" \
-          --referer "$URL" \
-          --cookies cookies/cookies.txt \
           --concurrent-fragments 10 \
-          --extractor-retries 10 \
-          --file-access-retries 10 \
           --http-chunk-size 10M \
           --merge-output-format mp4 \
           --remux-video mp4 \
+          --extractor-args "pornhub:client=web" \
+          --user-agent "$UA" \
+          --referer "$URL" \
+          $COOKIE_ARG \
           --format "$FORMAT" \
           -o "$OUTPUT" \
           "$URL"
 
     #######################################################################
-    # ARIA2 DIRECT DOWNLOAD
+    # DIRECT FALLBACK
     #######################################################################
 
-    - name: Direct aria2 fallback
+    - name: aria2 fallback
       if: steps.primary.outcome != 'success'
       continue-on-error: true
       run: |
 
-        echo "Trying direct download..."
+        echo "Trying direct download"
 
         aria2c \
           --max-connection-per-server=16 \
@@ -250,10 +317,10 @@ jobs:
           --header="Referer: $URL" \
           --dir=downloads \
           --out=direct_video.mp4 \
-          "$URL"
+          "$URL" || true
 
     #######################################################################
-    # HLS DETECTOR
+    # EXTRACT STREAMS
     #######################################################################
 
     - name: Extract HLS links
@@ -263,55 +330,105 @@ jobs:
         yt-dlp \
           --dump-json \
           --skip-download \
+          --user-agent "$UA" \
           "$URL" > info.json || true
 
-        cat info.json | jq -r '
+        jq -r '
           .formats[]?.url // empty
-        ' | grep "m3u8" > links.txt || true
+        ' info.json \
+        | grep -i "m3u8" \
+        | sort -u \
+        > links.txt || true
 
+        echo "Detected streams:"
         cat links.txt || true
 
     #######################################################################
-    # HLS DOWNLOAD
+    # HLS FALLBACK
     #######################################################################
 
     - name: HLS fallback parser
       continue-on-error: true
       run: |
 
-        if [ ! -f links.txt ]; then
+        set -Eeuo pipefail
+
+        if [ ! -s links.txt ]; then
+          echo "No HLS links found"
           exit 0
         fi
 
+        echo "Sorting streams by quality"
+
+        SORTED=$(mktemp)
+
+        (
+          grep -i "2160\|4k" links.txt || true
+          grep -i "1440" links.txt || true
+          grep -i "1080" links.txt || true
+          grep -i "720" links.txt || true
+          grep -i "480" links.txt || true
+          grep -i "360" links.txt || true
+          grep -i "240" links.txt || true
+        ) | awk '!seen[$0]++' > "$SORTED"
+
+        echo "Priority order:"
+        cat "$SORTED"
+
         INDEX=0
 
-        while true
+        while read -r LINK
         do
 
-          LINK=$(sed -n "$((INDEX+1))p" links.txt)
+          [ -z "$LINK" ] && continue
 
-          if [ -z "$LINK" ]; then
-            break
-          fi
-
-          echo "Trying HLS:"
+          echo "Trying stream:"
           echo "$LINK"
 
+          OUT="downloads/hls_${INDEX}.mp4"
+
           ffmpeg \
-            -y \
+            -hide_banner \
             -loglevel warning \
+            -y \
             -user_agent "$UA" \
             -headers $'Referer: '"$URL"$'\r\nOrigin: https://'"$DOMAIN"$'\r\nUser-Agent: '"$UA"$'\r\n' \
             -i "$LINK" \
             -c copy \
-            "downloads/hls_$INDEX.mp4" && break
+            "$OUT"
+
+          if [ -f "$OUT" ]; then
+
+            SIZE=$(stat -c%s "$OUT" || echo 0)
+
+            if [ "$SIZE" -gt 5000000 ]; then
+
+              echo "SUCCESS"
+              echo "Downloaded: $OUT"
+
+              ffprobe \
+                -v error \
+                -select_streams v:0 \
+                -show_entries stream=width,height,bit_rate \
+                -of default=noprint_wrappers=1 \
+                "$OUT" || true
+
+              break
+
+            else
+
+              echo "Broken stream"
+
+              rm -f "$OUT" || true
+            fi
+          fi
 
           INDEX=$((INDEX+1))
 
-        done
+        done < "$SORTED"
 
     #######################################################################
-    # DASH FALLBACK
+    # DASH
     #######################################################################
 
     - name: DASH fallback
@@ -323,18 +440,19 @@ jobs:
         fi
 
         ffmpeg \
-          -y \
+          -hide_banner \
           -loglevel warning \
+          -y \
           -user_agent "$UA" \
           -i "$URL" \
           -c copy \
           downloads/dash_video.mp4 || true
 
     #######################################################################
-    # CLOUDFLARE BYPASS ATTEMPT
+    # CLOUDFLARE
     #######################################################################
 
-    - name: Cloudflare bypass strategy
+    - name: Cloudflare bypass attempt
       continue-on-error: true
       run: |
 
@@ -350,10 +468,10 @@ jobs:
           -o temp/page.html \
           "$URL" || true
 
-        grep -i "cloudflare" temp/page.html || true
+        grep -i cloudflare temp/page.html || true
 
     #######################################################################
-    # RECOVERY ROOT FILES
+    # RECOVERY
     #######################################################################
 
     - name: Recovery move
@@ -361,49 +479,39 @@ jobs:
       run: |
 
         find . -maxdepth 1 -type f \
-          \( \
+        \( \
           -iname "*.mp4" -o \
           -iname "*.mkv" -o \
           -iname "*.webm" -o \
           -iname "*.mov" -o \
           -iname "*.avi" \
-          \) \
-          -exec mv {} downloads/ \; || true
+        \) \
+        -exec mv -f {} downloads/ \; || true
 
     #######################################################################
-    # FINAL RECOVERY
-    #######################################################################
-
-    - name: Deep recovery
-      continue-on-error: true
-      run: |
-
-        find . -type f \
-          \( \
-          -iname "*.mp4" -o \
-          -iname "*.mkv" -o \
-          -iname "*.webm" -o \
-          -iname "*.mov" -o \
-          -iname "*.avi" \
-          \) \
-          -exec cp {} downloads/ \; || true
-
-    #######################################################################
-    # VERIFY FILES
+    # VERIFY
     #######################################################################
 
     - name: Verify downloads
       run: |
 
-        echo "Downloaded files:"
+        echo "Files:"
         find downloads -type f
 
-        COUNT=$(find downloads -type f | wc -l)
+        VIDEO_COUNT=$(find downloads -type f \
+          \( \
+            -iname "*.mp4" -o \
+            -iname "*.mkv" -o \
+            -iname "*.webm" -o \
+            -iname "*.mov" -o \
+            -iname "*.avi" \
+          \) | wc -l)
 
-        echo "COUNT=$COUNT"
+        echo "Video count:"
+        echo "$VIDEO_COUNT"
 
-        if [ "$COUNT" -eq 0 ]; then
-          echo "ERROR: No files downloaded"
+        if [ "$VIDEO_COUNT" -eq 0 ]; then
+          echo "ERROR: no video downloaded"
           exit 1
         fi
 
@@ -417,13 +525,20 @@ jobs:
 
         for file in downloads/*
         do
-          echo "FILE: $file"
 
-          mediainfo "$file" || true
+          if [ -f "$file" ]; then
+
+            echo "================================="
+            echo "FILE: $file"
+            echo "================================="
+
+            mediainfo "$file" || true
+          fi
+
         done
 
     #######################################################################
-    # FILE SIZE CHECK
+    # SIZE CHECK
     #######################################################################
 
     - name: Validate size
@@ -432,6 +547,8 @@ jobs:
 
         for file in downloads/*
         do
+
+          [ ! -f "$file" ] && continue
 
           SIZE=$(stat -c%s "$file" || echo 0)
 
@@ -455,7 +572,7 @@ jobs:
     # COMMIT
     #######################################################################
 
-    - name: Commit files
+    - name: Commit downloads
       run: |
 
         git config --global user.name "github-actions[bot]"
@@ -478,7 +595,7 @@ jobs:
         git push origin HEAD
 
     #######################################################################
-    # FINAL OUTPUT
+    # FINAL
     #######################################################################
 
     - name: Final summary
@@ -489,10 +606,10 @@ jobs:
         echo "===================================="
 
         echo "Files:"
-        ls -lah downloads
+        ls -lah downloads || true
 
         echo "===================================="
 
-        du -sh downloa  ds || true
+        du -sh downloads || true
 
         echo "===================================="
