@@ -1,4 +1,4 @@
-name: Video Downloader V5 Ultra Fixed beta
+name: Video Downloader V5 Ultra Fixed
 
 on:
   workflow_dispatch:
@@ -98,15 +98,6 @@ jobs:
         key: playwright-${{ runner.os }}
 
     ########################################
-    # WRITE COOKIES
-    ########################################
-
-    - name: Write YouTube cookies
-      run: |
-        echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
-        chmod 600 cookies.txt
-
-    ########################################
     # INSTALL TOOLS
     ########################################
 
@@ -146,6 +137,8 @@ jobs:
 
         cat urls.txt \
         | sed '/^$/d' \
+        | grep -vi 'youtube.com' \
+        | grep -vi 'youtu.be' \
         | sort -u \
         > cleaned.txt
 
@@ -179,9 +172,12 @@ jobs:
                 ".mp4",
                 ".m3u8",
                 ".mpd",
-                "videoplayback",
+                ".mov",
+                ".webm",
+                ".mkv",
+                "playlist",
                 "manifest",
-                "playlist"
+                "stream"
             ]
 
             bad = [
@@ -243,17 +239,7 @@ jobs:
                 wait_until="domcontentloaded"
             )
 
-            try:
-                page.mouse.click(640, 360)
-            except:
-                pass
-
-            try:
-                page.locator("video").click(timeout=10000)
-            except:
-                pass
-
-            page.wait_for_timeout(45000)
+            page.wait_for_timeout(30000)
 
             browser.close()
 
@@ -297,32 +283,27 @@ jobs:
           mkdir -p "$DIR"
 
           ########################################
-          # MAIN YT-DLP
+          # MAIN DOWNLOAD
           ########################################
 
           yt-dlp \
-            --cookies cookies.txt \
             --no-playlist \
             --ignore-errors \
             --continue \
-            --retries 30 \
-            --fragment-retries 30 \
-            --extractor-retries 30 \
-            --file-access-retries 30 \
+            --retries 20 \
+            --fragment-retries 20 \
+            --extractor-retries 20 \
             --retry-sleep 5 \
-            --sleep-requests 2 \
-            --sleep-interval 2 \
+            --sleep-requests 1 \
             --concurrent-fragments 2 \
-            --hls-use-mpegts \
             --merge-output-format mp4 \
             --restrict-filenames \
             --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36" \
-            --extractor-args "youtube:player_client=android" \
             -f "bv*+ba/b" \
             -o "$DIR/%(title).120s_%(id)s.%(ext)s" \
             "$URL" || true
 
-          FILE=$(find "$DIR" -type f -iname "*.mp4" | sort | tail -n1 || true)
+          FILE=$(find "$DIR" -type f | grep -Ei '\.mp4|\.mkv|\.webm|\.mov' | head -n1 || true)
 
           SIZE=0
 
@@ -349,11 +330,10 @@ jobs:
             SUCCESS=0
 
             ########################################
-            # M3U8
+            # M3U8 STREAMS
             ########################################
 
             grep -i '\.m3u8' "$DIR/all.txt" \
-            | grep -viE 'low|preview' \
             > "$DIR/m3u8.txt" || true
 
             while read M
@@ -362,7 +342,6 @@ jobs:
               [ -z "$M" ] && continue
 
               yt-dlp \
-                --cookies cookies.txt \
                 --referer "$URL" \
                 --add-header "Referer:$URL" \
                 --add-header "User-Agent:Mozilla/5.0" \
@@ -378,15 +357,14 @@ jobs:
             done < "$DIR/m3u8.txt"
 
             ########################################
-            # MP4 DIRECT
+            # DIRECT VIDEO LINKS
             ########################################
 
             if [ $SUCCESS -eq 0 ]; then
 
-              grep -Ei '\.mp4|videoplayback' "$DIR/all.txt" \
-              | grep -viE 'preview|sample|thumb' \
+              grep -Ei '\.mp4|\.mov|\.mkv|\.webm' "$DIR/all.txt" \
               | sort -u \
-              > "$DIR/mp4.txt" || true
+              > "$DIR/direct.txt" || true
 
               while read M
               do
@@ -394,7 +372,6 @@ jobs:
                 [ -z "$M" ] && continue
 
                 yt-dlp \
-                  --cookies cookies.txt \
                   --ignore-errors \
                   --no-check-certificates \
                   --add-header "Referer:$URL" \
@@ -412,7 +389,7 @@ jobs:
                   -o "$DIR/video.mp4" \
                   && SUCCESS=1 && break
 
-              done < "$DIR/mp4.txt"
+              done < "$DIR/direct.txt"
 
             fi
 
@@ -422,7 +399,7 @@ jobs:
           # CLEANUP
           ########################################
 
-          FILE=$(find "$DIR" -type f -iname "*.mp4" | sort | tail -n1 || true)
+          FILE=$(find "$DIR" -type f | grep -Ei '\.mp4|\.mkv|\.webm|\.mov' | head -n1 || true)
 
           if [ ! -z "$FILE" ]; then
 
