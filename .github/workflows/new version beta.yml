@@ -1,4 +1,4 @@
-name: Video Downloader V4 Fixed
+name: Video Downloader V4 Fixed beta
 
 on:
   workflow_dispatch:
