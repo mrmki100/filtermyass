@@ -1,4 +1,4 @@
-name: Video Downloader V4 Fixed
+name: Video Downloader V4 Fixed Fast
 
 on:
   workflow_dispatch:
@@ -24,25 +24,85 @@ permissions:
 
 jobs:
   download:
+
     runs-on: ubuntu-latest
+
     timeout-minutes: 360
+
+    container:
+      image: mcr.microsoft.com/playwright/python:v1.59.0-noble
 
     steps:
 
-    - uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v4
 
-    - name: Install tools
+    ############################################
+    # CACHE PIP
+    ############################################
+
+    - name: Cache pip
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-v4fixed-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-v4fixed-
+
+    ############################################
+    # CACHE PLAYWRIGHT
+    ############################################
+
+    - name: Cache Playwright
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ runner.os }}-playwright-v4fixed
+
+    ############################################
+    # REQUIREMENTS
+    ############################################
+
+    - name: Create requirements
+      run: |
+        cat > requirements.txt <<EOF
+        yt-dlp
+        playwright
+        EOF
+
+    ############################################
+    # INSTALL PYTHON PACKAGES
+    ############################################
+
+    - name: Install python packages
       run: |
         python3 -m pip install --upgrade pip
-        pip install yt-dlp playwright
+        pip install -r requirements.txt
 
-        sudo apt-get update
-        sudo apt-get install -y ffmpeg wget jq p7zip-full curl
+    ############################################
+    # INSTALL ONLY NEEDED PACKAGE
+    ############################################
 
+    - name: Install minimal tools
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends p7zip-full jq
+
+    ############################################
+    # INSTALL PLAYWRIGHT BROWSER
+    ############################################
+
+    - name: Install chromium
+      run: |
         playwright install chromium
+
+    ############################################
+    # PREPARE URLS
+    ############################################
 
     - name: Prepare URLs
       run: |
+
         cat > urls.txt <<EOF
         ${{ github.event.inputs.url1 }}
         ${{ github.event.inputs.url2 }}
@@ -53,36 +113,51 @@ jobs:
 
         sed -i '/^$/d' urls.txt
 
-    - name: Create network interceptor
+        echo "URLS:"
+        cat urls.txt
+
+    ############################################
+    # CREATE INTERCEPTOR
+    ############################################
+
+    - name: Create interceptor
       run: |
+
         cat > intercept.py << 'PY'
+
         import sys
         import json
+
         from playwright.sync_api import sync_playwright
 
         url = sys.argv[1]
+
         media = []
 
         def valid(u):
+
             good = [
-                ".mp4",
                 ".m3u8",
+                ".mp4",
                 ".mpd",
-                "videoplayback",
+                "playlist",
                 "manifest",
-                "playlist"
+                "videoplayback"
             ]
 
             bad = [
                 ".jpg",
+                ".jpeg",
                 ".png",
                 ".gif",
+                ".svg",
                 ".css",
                 ".js",
-                ".svg",
+                "doubleclick",
                 "banner",
                 "ads",
-                "doubleclick"
+                "analytics",
+                "tracker"
             ]
 
             ul = u.lower()
@@ -99,7 +174,9 @@ jobs:
 
         with sync_playwright() as p:
 
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(
+                headless=True
+            )
 
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
@@ -107,12 +184,16 @@ jobs:
 
             page = context.new_page()
 
-            def resp(r):
+            def handle_response(r):
+
                 try:
+
                     u = r.url
+
                     ct = r.headers.get("content-type", "")
 
                     if valid(u) or "video" in ct or "mpegurl" in ct:
+
                         media.append({
                             "url": u,
                             "type": ct
@@ -121,7 +202,7 @@ jobs:
                 except:
                     pass
 
-            page.on("response", resp)
+            page.on("response", handle_response)
 
             page.goto(
                 url,
@@ -149,11 +230,18 @@ jobs:
         for m in media:
 
             if m["url"] not in seen:
+
                 seen.add(m["url"])
+
                 uniq.append(m)
 
         print(json.dumps(uniq))
+
         PY
+
+    ############################################
+    # DOWNLOAD VIDEOS
+    ############################################
 
     - name: Download videos
       run: |
@@ -164,18 +252,22 @@ jobs:
         do
 
           (
-          echo "PROCESSING $URL"
+
+          echo "================================="
+          echo "START $URL"
+          echo "================================="
 
           TS=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
+
           DIR="downloads/$TS"
 
           mkdir -p "$DIR"
 
-          ################################
-          # STEP 1 DIRECT YT-DLP
-          ################################
+          ####################################
+          # STEP 1 DIRECT DOWNLOAD
+          ####################################
 
-          echo "STEP1 yt-dlp"
+          echo "DIRECT yt-dlp"
 
           yt-dlp \
             --no-playlist \
@@ -186,11 +278,11 @@ jobs:
             --retries 20 \
             --fragment-retries 20 \
             --retry-sleep 5 \
-            --concurrent-fragments 8 \
+            --concurrent-fragments 4 \
             --hls-use-mpegts \
             --downloader ffmpeg \
-            -f "bestvideo+bestaudio/best" \
             --merge-output-format mp4 \
+            -f "bestvideo+bestaudio/best" \
             -o "$DIR/%(title).120s_%(id)s.%(ext)s" \
             "$URL" || true
 
@@ -202,37 +294,41 @@ jobs:
             SIZE=$(stat -c%s "$FILE")
           fi
 
-          ################################
+          ####################################
           # HARD MODE
-          ################################
+          ####################################
 
-          if [ -z "$FILE" ] || [ $SIZE -lt 5000000 ]; then
+          if [ -z "$FILE" ] || [ "$SIZE" -lt 5000000 ]; then
 
-            echo "START HARD MODE"
+            echo "ENTER HARD MODE"
 
             rm -f "$DIR"/* || true
 
+            ####################################
+            # INTERCEPT MEDIA
+            ####################################
+
             python3 intercept.py "$URL" > "$DIR/media.json"
 
-            echo "MEDIA FOUND"
+            echo "MEDIA:"
             cat "$DIR/media.json"
 
-            ################################
-            # FILTER MEDIA
-            ################################
+            ####################################
+            # EXTRACT URLS
+            ####################################
 
             cat "$DIR/media.json" \
             | jq -r '.[].url' \
-            | grep -viE 'adtng|doubleclick|jerkmate|creative|banner|ads|preview|sprite|thumb' \
+            | grep -viE 'doubleclick|ads|banner|preview|sprite|thumb|analytics' \
             | sort -u \
             > "$DIR/all.txt"
 
-            ################################
-            # TRY M3U8 FIRST
-            ################################
+            ####################################
+            # M3U8 FIRST
+            ####################################
 
             grep -i '\.m3u8' "$DIR/all.txt" \
-            | grep -viE '360|240|144|low|preview' \
+            | grep -viE '144|240|360|low|preview' \
             > "$DIR/m3u8.txt" || true
 
             SUCCESS=0
@@ -244,29 +340,31 @@ jobs:
                 continue
               fi
 
-              echo "TRY HLS $M"
+              echo "TRY HLS:"
+              echo "$M"
 
               yt-dlp \
                 --referer "$URL" \
                 --add-header "Referer:$URL" \
                 --add-header "User-Agent:Mozilla/5.0" \
-                --hls-use-mpegts \
-                --downloader ffmpeg \
                 --retries 20 \
                 --fragment-retries 20 \
                 --retry-sleep 5 \
-                -f best \
+                --concurrent-fragments 4 \
+                --hls-use-mpegts \
+                --downloader ffmpeg \
                 --merge-output-format mp4 \
+                -f best \
                 -o "$DIR/stream.%(ext)s" \
                 "$M" && SUCCESS=1 && break
 
             done < "$DIR/m3u8.txt"
 
-            ################################
-            # TRY MP4
-            ################################
+            ####################################
+            # MP4 FALLBACK
+            ####################################
 
-            if [ $SUCCESS -eq 0 ]; then
+            if [ "$SUCCESS" -eq 0 ]; then
 
               grep -i '\.mp4' "$DIR/all.txt" \
               | grep -viE 'preview|sample|thumb' \
@@ -279,7 +377,8 @@ jobs:
                   continue
                 fi
 
-                echo "TRY MP4 $M"
+                echo "TRY MP4:"
+                echo "$M"
 
                 wget \
                   --tries=20 \
@@ -296,9 +395,9 @@ jobs:
 
           fi
 
-          ################################
-          # VALIDATE FILE
-          ################################
+          ####################################
+          # VALIDATE OUTPUT
+          ####################################
 
           FILE=$(find "$DIR" -type f -iname "*.mp4" | sort | tail -n1 || true)
 
@@ -306,11 +405,11 @@ jobs:
 
             SIZE=$(stat -c%s "$FILE")
 
-            echo "SIZE $SIZE"
+            echo "FINAL SIZE: $SIZE"
 
-            if [ $SIZE -lt 5000000 ]; then
+            if [ "$SIZE" -lt 5000000 ]; then
 
-              echo "FAIL tiny file"
+              echo "DELETE SMALL FILE"
 
               rm -f "$FILE"
 
@@ -318,9 +417,9 @@ jobs:
 
           fi
 
-          ################################
-          # SPLIT BIG FILE
-          ################################
+          ####################################
+          # SPLIT LARGE FILES
+          ####################################
 
           FILE=$(find "$DIR" -type f -iname "*.mp4" | sort | tail -n1 || true)
 
@@ -328,13 +427,13 @@ jobs:
 
             SIZE=$(stat -c%s "$FILE")
 
-            if [ $SIZE -gt 95000000 ]; then
+            if [ "$SIZE" -gt 95000000 ]; then
 
-              echo "SPLIT BIG FILE"
+              echo "SPLIT LARGE FILE"
 
               7z a -v90m "$DIR/video.7z" "$FILE"
 
-              rm "$FILE"
+              rm -f "$FILE"
 
             fi
 
@@ -347,6 +446,10 @@ jobs:
         done < urls.txt
 
         wait
+
+    ############################################
+    # COMMIT DOWNLOADS
+    ############################################
 
     - name: Commit downloads
       run: |
