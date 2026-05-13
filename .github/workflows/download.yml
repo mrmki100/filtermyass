@@ -1,222 +1,329 @@
 name: Video Downloader Workflow
+
 on:
-	 workflow_dispatch:
-		 inputs:
-		 urls:
-			 description: 'Video URLs (one per line)'
-			 required: true
-			 type: string
-		 quality:
-			 description: 'Preferred quality (e.g., 720p, best)'			 required: false
-			 default: 'best'
-			 type: string
-		 mode:
-			 description: 'Download mode'
-			 required: false
-			 default: 'normal'
-			 type: choice
-			 options:
-				 - normal
-				 - hard
-		 cookie_domain:
-			 description: 'Domain for cookie extraction'
-			 required: false
-			 type: string
- 
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: "Video URLs (one per line)"
+        required: true
+        type: string
+
+      quality:
+        description: "Preferred quality"
+        required: false
+        default: "best"
+        type: string
+
+      mode:
+        description: "Download mode"
+        required: false
+        default: "normal"
+        type: choice
+        options:
+          - normal
+          - hard
+
+      cookie_domain:
+        description: "Domain for cookie extraction"
+        required: false
+        type: string
 
 jobs:
-	 download:
-		 runs-on: ubuntu-latest
- steps:
- - name: Checkout repository
- uses: actions/checkout@v4
- - name: Setup Python
- uses: actions/setup-python@v5 with:
-	 python-version: '3.10'
- - name: Install system dependencies run: |
-	 sudo apt-get update
-	 sudo apt-get install -y \
-		 ffmpeg \
-		 mediainfo \
-		 zip \
-		 unzip \
-		 curl \
-		 wget
- - name: Install Python requirements run: |
-	 pip install --upgrade pip
-	 pip install \
-		 yt-dlp \
-		 requests \
-		 beautifulsoup4 \
-		 lxml \
-		 m3u8
- - name: Create interceptor.py
- run: |
-	 cat > interceptor.py << 'EOF'
- 
+  download:
+    runs-on: ubuntu-latest
 
- #!/usr/bin/env python3
- """
- HTTP request interceptor for m3u8 filtering
- """
- from http.server import HTTPServer, BaseHTTPRequestHandler import urllib.parse
- import re
- class InterceptorHandler(BaseHTTPRequestHandler):	 def do_GET(self):
-		 parsed = urllib.parse.urlparse(self.path)		 query = urllib.parse.parse_qs(parsed.query)
- if 'url' in query:
- target_url = query['url'][0]
- if target_url.endswith('.m3u8'):	 import m3u8
-	 import requests
- try:
- resp = requests.get(target_url, timeout=10) if resp.status_code == 200:
-	 playlist = m3u8.loads(resp.text)
- # Filter segments
- filtered_segments = []
- for seg in playlist.segments:
-	 if not any(x in seg.uri for x in ['		 filtered_segments.append(seg)
- playlist.segments = filtered_segments
- self.send_response(200)
- self.send_header('Content-Type', 'appli self.end_headers()
- self.wfile.write(playlist.dumps().encod return
- 
+    steps:
 
- except Exception as e:
- print(f"Error processing m3u8: {e}")
- self.send_response(404)
- self.end_headers()
- if __name__ == '__main__':
-	 server = HTTPServer(('localhost', 8765), InterceptorHandler	 print("Interceptor running on port 8765")
-	 server.serve_forever()
- EOF
- - name: Save URLs to file
- run: |
-	 echo "${{ inputs.urls }}" > urls.txt	 echo "URLs saved:"
-	 cat urls.txt
- - name: Extract cookies (if domain provided)
- if: ${{ inputs.cookie_domain != '' }}
- run: |
-	 echo "Extracting cookies for domain: ${{ inputs.cookie_domain }	 # Cookie extraction logic would be implemented here
-	 echo "cookies_extracted=1" >> $GITHUB_ENV
- - name: Start interceptor in background run: |
-	 python3 interceptor.py &
-	 echo $! > interceptor.pid
-	 sleep 2
- - name: Main download logic
- run: |
-	 # Read URLs from file
-	 mapfile -t URL_ARRAY < urls.txt
- for url in "${URL_ARRAY[@]}"; do
- 
+      #######################################################
+      # CHECKOUT
+      #######################################################
 
- echo "Processing: $url"
- # Hard mode logic
- if [[ "${{ inputs.mode }}" == "hard" ]]; then
-	 echo "Hard mode enabled - using advanced extraction"	 python3 -c "
-	 import yt_dlp
-	 import json
- ydl_opts = {
-	 'quiet': True,
-	 'no_warnings': True,
-	 'force_generic_extractor': True,
-	 'extractor_args': {'generic': ['--no-check-certificate' }
-	 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-		 try:
-			 info = ydl.extract_info('$url', download=False)			 print(json.dumps(info, indent=2))
-		 except Exception as e:
-			 print(f'Hard mode extraction failed: {e}')	 "
- fi
- # M3U8 detection and filtering
- if [[ "$url" == *".m3u8"* ]]; then
-	 echo "M3U8 stream detected - applying filtering"	 FILTERED_URL="http://localhost:8765?url=${url}" else
-	 FILTERED_URL="$url"
- fi
- # Quality generation logic
- QUALITY="${{ inputs.quality }}"
- if [[ "$QUALITY" == "auto" ]]; then
-	 QUALITY_ARGS=""
- 
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
- elif [[ "$QUALITY" == "best" ]]; then
-	 QUALITY_ARGS="-f best"
- elif [[ "$QUALITY" == "worst" ]]; then
-	 QUALITY_ARGS="-f worst"
- else
-	 # Parse resolution like 720p
-	 HEIGHT="${QUALITY%p}"
-	 QUALITY_ARGS="-f \"best[height<=$HEIGHT]\"" fi
- # yt-dlp download with fallback
- echo "Downloading with yt-dlp..."
- YTDLP_CMD="yt-dlp \
-	 --no-check-certificate \
-	 --user-agent 'Mozilla/5.0' \
-	 --retries 10 \
-	 --fragment-retries 10 \
-	 --buffer-size 16K \
-	 --http-chunk-size 10M \
-	 --concurrent-fragments 5 \
-	 --no-part \
-	 --restrict-filenames \
-	 --output '%(title)s.%(ext)s' \
-	 $QUALITY_ARGS \
-	 '$FILTERED_URL'"
- if ! eval "$YTDLP_CMD"; then
-	 echo "yt-dlp failed, attempting direct MP4 fallback..."
- # Direct MP4 fallback logic
- if [[ "$url" == *".mp4"* ]]; then
-	 wget --user-agent="Mozilla/5.0" \
-		 --no-check-certificate \
-		 --tries=3 \
-		 --output-document="direct_fallback.mp4" \		 "$url"
- else
- 
+      #######################################################
+      # PYTHON
+      #######################################################
 
-			 echo "No direct MP4 fallback available"		 fi
-	 fi
- done
- - name: Generate MediaInfo reports
- run: |
-	 for file in *.{mp4,mkv,webm,avi}; do
-		 if [ -f "$file" ]; then
-			 echo "=== MediaInfo for $file ===" >> mediainfo.txt			 mediainfo "$file" >> mediainfo.txt
-			 echo -e "\n\n" >> mediainfo.txt
-		 fi
-	 done
- - name: Stop interceptor
- run: |
-	 if [ -f interceptor.pid ]; then
-		 kill $(cat interceptor.pid) 2>/dev/null || true		 rm -f interceptor.pid
-	 fi
- - name: Cleanup temporary files
- run: |
-	 rm -f interceptor.py
-	 rm -f urls.txt
-	 # Remove partial downloads
-	 find . -name "*.part" -delete
-	 find . -name "*.ytdl" -delete
- - name: Create zip archive
- run: |
-	 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-	 mkdir -p downloads
-	 mv *.{mp4,mkv,webm,avi,json,info.txt} downloads/ 2>/dev/null ||	 mv mediainfo.txt downloads/ 2>/dev/null || true
- 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
 
- if [ -d "downloads" ] && [ "$(ls -A downloads 2>/dev/null)" ]; 	 zip -r "video_downloads_${TIMESTAMP}.zip" downloads/
- else
-	 echo "No files to archive" > empty.txt
-	 zip "video_downloads_${TIMESTAMP}.zip" empty.txt
- fi
- - name: Upload artifacts
- uses: actions/upload-artifact@v4
- with:
-	 name: video-downloads
-	 path: |
-		 video_downloads_*.zip
-		 downloads/
-	 retention-days: 7
- - name: Final cleanup
- run: |
-	 rm -rf downloads/
-	 rm -f video_downloads_*.zip
-	 echo "done < urls.txt"
-	 echo "wait"
-	 echo "All processes completed successfully"
+      #######################################################
+      # SYSTEM DEPENDENCIES
+      #######################################################
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            ffmpeg \
+            mediainfo \
+            zip \
+            unzip \
+            curl \
+            wget \
+            jq
+
+      #######################################################
+      # PYTHON REQUIREMENTS
+      #######################################################
+
+      - name: Install Python requirements
+        run: |
+          pip install --upgrade pip
+
+          pip install \
+            yt-dlp \
+            requests \
+            beautifulsoup4 \
+            lxml \
+            m3u8 \
+            playwright
+
+          playwright install --with-deps chromium
+
+      #######################################################
+      # CREATE INTERCEPTOR
+      #######################################################
+
+      - name: Create interceptor.py
+        run: |
+          cat > interceptor.py << 'EOF'
+          #!/usr/bin/env python3
+
+          from http.server import HTTPServer, BaseHTTPRequestHandler
+          import urllib.parse
+          import requests
+          import m3u8
+
+          class InterceptorHandler(BaseHTTPRequestHandler):
+
+              def do_GET(self):
+
+                  parsed = urllib.parse.urlparse(self.path)
+                  query = urllib.parse.parse_qs(parsed.query)
+
+                  if 'url' not in query:
+                      self.send_response(400)
+                      self.end_headers()
+                      return
+
+                  target_url = query['url'][0]
+
+                  try:
+
+                      resp = requests.get(
+                          target_url,
+                          timeout=15
+                      )
+
+                      if resp.status_code != 200:
+                          self.send_response(404)
+                          self.end_headers()
+                          return
+
+                      if target_url.endswith(".m3u8"):
+
+                          playlist = m3u8.loads(resp.text)
+
+                          filtered_segments = []
+
+                          for seg in playlist.segments:
+
+                              if not any(
+                                  x in seg.uri.lower()
+                                  for x in [
+                                      "ads",
+                                      "promo",
+                                      "banner",
+                                      "doubleclick"
+                                  ]
+                              ):
+                                  filtered_segments.append(seg)
+
+                          playlist.segments = filtered_segments
+
+                          self.send_response(200)
+
+                          self.send_header(
+                              "Content-Type",
+                              "application/vnd.apple.mpegurl"
+                          )
+
+                          self.end_headers()
+
+                          self.wfile.write(
+                              playlist.dumps().encode()
+                          )
+
+                          return
+
+                      self.send_response(200)
+                      self.end_headers()
+                      self.wfile.write(resp.content)
+
+                  except Exception as e:
+                      print(e)
+
+                      self.send_response(500)
+                      self.end_headers()
+
+          if __name__ == "__main__":
+
+              server = HTTPServer(
+                  ("0.0.0.0", 8765),
+                  InterceptorHandler
+              )
+
+              print("Interceptor running on port 8765")
+
+              server.serve_forever()
+          EOF
+
+      #######################################################
+      # SAVE URLS
+      #######################################################
+
+      - name: Save URLs
+        run: |
+          echo "${{ inputs.urls }}" > urls.txt
+
+          echo "Saved URLs:"
+          cat urls.txt
+
+      #######################################################
+      # START INTERCEPTOR
+      #######################################################
+
+      - name: Start interceptor
+        run: |
+          python3 interceptor.py &
+
+          echo $! > interceptor.pid
+
+          sleep 3
+
+      #######################################################
+      # MAIN DOWNLOAD
+      #######################################################
+
+      - name: Download videos
+        run: |
+
+          mkdir -p downloads
+
+          mapfile -t URL_ARRAY < urls.txt
+
+          for url in "${URL_ARRAY[@]}"
+          do
+
+            echo "================================="
+            echo "PROCESSING:"
+            echo "$url"
+            echo "================================="
+
+            QUALITY="${{ inputs.quality }}"
+
+            if [[ "$QUALITY" == "best" ]]; then
+
+              FORMAT="bestvideo+bestaudio/best"
+
+            elif [[ "$QUALITY" == "worst" ]]; then
+
+              FORMAT="worst"
+
+            else
+
+              HEIGHT="${QUALITY%p}"
+
+              FORMAT="best[height<=${HEIGHT}]"
+
+            fi
+
+            FILTERED_URL="$url"
+
+            if [[ "$url" == *".m3u8"* ]]; then
+
+              FILTERED_URL="http://localhost:8765?url=$url"
+
+            fi
+
+            yt-dlp \
+              --user-agent "Mozilla/5.0" \
+              --no-check-certificate \
+              --retries 20 \
+              --fragment-retries 20 \
+              --concurrent-fragments 5 \
+              --no-part \
+              --merge-output-format mp4 \
+              -f "$FORMAT" \
+              -o "downloads/%(title)s.%(ext)s" \
+              "$FILTERED_URL" || true
+
+          done
+
+      #######################################################
+      # MEDIAINFO
+      #######################################################
+
+      - name: Generate MediaInfo
+        run: |
+
+          for file in downloads/*.{mp4,mkv,webm,avi}
+          do
+
+            if [ -f "$file" ]; then
+
+              echo "================================="
+              echo "$file"
+              echo "================================="
+
+              mediainfo "$file"
+
+            fi
+
+          done
+
+      #######################################################
+      # ZIP
+      #######################################################
+
+      - name: Create zip archive
+        run: |
+
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+          zip -r \
+            "video_downloads_${TIMESTAMP}.zip" \
+            downloads/
+
+      #######################################################
+      # UPLOAD
+      #######################################################
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-downloads
+          path: video_downloads_*.zip
+          retention-days: 7
+
+      #######################################################
+      # CLEANUP
+      #######################################################
+
+      - name: Cleanup
+        run: |
+
+          if [ -f interceptor.pid ]; then
+            kill $(cat interceptor.pid) || true
+          fi
+
+          rm -f interceptor.pid
+          rm -f interceptor.py
+          rm -f urls.txt
+
+          echo "All processes completed successfully"
