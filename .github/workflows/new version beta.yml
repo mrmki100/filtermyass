@@ -44,13 +44,14 @@ jobs:
     steps:
 
     ########################################
-    # CHECKOUT
+    # CHECKOUT (FAST)
     ########################################
 
     - name: Checkout
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0
+        fetch-depth: 1
+        fetch-tags: false
         persist-credentials: true
 
     ########################################
@@ -141,7 +142,6 @@ jobs:
 
         import sys
         import json
-
         from playwright.sync_api import sync_playwright
 
         url = sys.argv[1]
@@ -187,9 +187,7 @@ jobs:
 
         with sync_playwright() as p:
 
-            browser = p.chromium.launch(
-                headless=True
-            )
+            browser = p.chromium.launch(headless=True)
 
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
@@ -202,7 +200,6 @@ jobs:
                 try:
 
                     u = r.url
-
                     ct = r.headers.get("content-type", "")
 
                     if valid(u) or "video" in ct or "mpegurl" in ct:
@@ -238,7 +235,6 @@ jobs:
             browser.close()
 
         unique = []
-
         seen = set()
 
         for m in media:
@@ -246,7 +242,6 @@ jobs:
             if m["url"] not in seen:
 
                 seen.add(m["url"])
-
                 unique.append(m)
 
         print(json.dumps(unique))
@@ -261,7 +256,6 @@ jobs:
       run: |
 
         set -e
-
         mkdir -p downloads
 
         while IFS= read -r URL
@@ -274,16 +268,9 @@ jobs:
           echo "======================================"
 
           TS=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
-
           DIR="downloads/$TS"
 
           mkdir -p "$DIR"
-
-          ####################################
-          # STEP 1 NORMAL YT-DLP
-          ####################################
-
-          echo "STEP1 NORMAL YT-DLP"
 
           yt-dlp \
             --no-playlist \
@@ -305,27 +292,17 @@ jobs:
             "$URL" || true
 
           FILE=$(find "$DIR" -type f -iname "*.mp4" | sort | tail -n1 || true)
-
           SIZE=0
 
           if [ ! -z "$FILE" ]; then
             SIZE=$(stat -c%s "$FILE")
           fi
 
-          ####################################
-          # HARD MODE
-          ####################################
-
           if [ -z "$FILE" ] || [ $SIZE -lt 5000000 ]; then
-
-            echo "START HARD MODE"
 
             rm -f "$DIR"/* || true
 
             python3 intercept.py "$URL" > "$DIR/media.json"
-
-            echo "========== MEDIA =========="
-            cat "$DIR/media.json" || true
 
             cat "$DIR/media.json" \
             | jq -r '.[].url' \
@@ -333,14 +310,7 @@ jobs:
             | sort -u \
             > "$DIR/all.txt"
 
-            echo "========== FOUND URLS =========="
-            cat "$DIR/all.txt" || true
-
             SUCCESS=0
-
-            ####################################
-            # TRY HLS
-            ####################################
 
             grep -i '\.m3u8' "$DIR/all.txt" \
             | grep -viE 'low|preview' \
@@ -349,12 +319,7 @@ jobs:
             while read M
             do
 
-              if [ -z "$M" ]; then
-                continue
-              fi
-
-              echo "TRY HLS"
-              echo "$M"
+              [ -z "$M" ] && continue
 
               yt-dlp \
                 --referer "$URL" \
@@ -371,10 +336,6 @@ jobs:
 
             done < "$DIR/m3u8.txt"
 
-            ####################################
-            # TRY MP4 / YOUTUBE DIRECT
-            ####################################
-
             if [ $SUCCESS -eq 0 ]; then
 
               grep -Ei '\.mp4|videoplayback' "$DIR/all.txt" \
@@ -385,16 +346,7 @@ jobs:
               while read M
               do
 
-                if [ -z "$M" ]; then
-                  continue
-                fi
-
-                echo "TRY DIRECT VIDEO"
-                echo "$M"
-
-                ################################
-                # TRY YT-DLP DIRECT
-                ################################
+                [ -z "$M" ] && continue
 
                 yt-dlp \
                   --ignore-errors \
@@ -404,10 +356,6 @@ jobs:
                   -o "$DIR/direct.%(ext)s" \
                   "$M" \
                   && SUCCESS=1 && break
-
-                ################################
-                # FALLBACK CURL
-                ################################
 
                 curl -L \
                   --retry 20 \
@@ -424,63 +372,22 @@ jobs:
 
           fi
 
-          ####################################
-          # DEBUG FILES
-          ####################################
-
-          echo "====== DOWNLOADED FILES ======"
-
-          find "$DIR" -type f | sort || true
-
-          echo "====== FILE SIZES ======"
-
-          du -h "$DIR" || true
-
-          ####################################
-          # DELETE SMALL FILES
-          ####################################
-
-          FILE=$(find "$DIR" -type f | sort | tail -n1 || true)
-
-          if [ ! -z "$FILE" ]; then
-
-            SIZE=$(stat -c%s "$FILE")
-
-            echo "FILE SIZE = $SIZE"
-
-            if [ $SIZE -lt 5000000 ]; then
-
-              echo "DELETE SMALL FILE"
-
-              rm -f "$FILE"
-
-            fi
-
-          fi
-
-          ####################################
-          # SPLIT LARGE FILES
-          ####################################
-
           FILE=$(find "$DIR" -type f -iname "*.mp4" | sort | tail -n1 || true)
 
           if [ ! -z "$FILE" ]; then
 
             SIZE=$(stat -c%s "$FILE")
 
-            if [ $SIZE -gt 95000000 ]; then
-
-              echo "SPLIT LARGE FILE"
-
-              7z a -v90m "$DIR/video.7z" "$FILE"
-
+            if [ $SIZE -lt 5000000 ]; then
               rm -f "$FILE"
+            fi
 
+            if [ $SIZE -gt 95000000 ]; then
+              7z a -v90m "$DIR/video.7z" "$FILE"
+              rm -f "$FILE"
             fi
 
           fi
-
-          echo "DONE $URL"
 
           ) &
 
@@ -489,56 +396,22 @@ jobs:
         wait
 
     ########################################
-    # DEBUG GIT
-    ########################################
-
-    - name: Debug git
-      run: |
-
-        pwd
-
-        ls -la
-
-        cd "$GITHUB_WORKSPACE"
-
-        git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-        git status || true
-
-    ########################################
     # COMMIT
     ########################################
 
     - name: Commit downloads
       run: |
 
-        set -e
-
         cd "$GITHUB_WORKSPACE"
 
-        git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
         git config user.name "github-actions"
-
         git config user.email "github-actions@github.com"
-
-        if [ ! -d ".git" ]; then
-          echo ".git missing"
-          exit 1
-        fi
-
-        git status
 
         git add downloads || true
 
         if git diff --cached --quiet; then
-
           echo "NO CHANGES"
-
         else
-
           git commit -m "videos downloaded"
-
           git push
-
         fi
