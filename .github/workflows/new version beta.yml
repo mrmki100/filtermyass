@@ -1,4 +1,4 @@
-name: Video Downloader V4 Fixed beta
+name: Video Downloader V5 Ultra Fixed beta
 
 on:
   workflow_dispatch:
@@ -31,6 +31,7 @@ defaults:
     shell: bash
 
 jobs:
+
   download:
 
     runs-on: ubuntu-latest
@@ -42,6 +43,10 @@ jobs:
 
     steps:
 
+    ########################################
+    # CHECKOUT
+    ########################################
+
     - name: Checkout
       uses: actions/checkout@v4
       with:
@@ -49,13 +54,13 @@ jobs:
         persist-credentials: true
 
     ########################################
-    # FIX CACHE PERMISSIONS
+    # FIX CACHE
     ########################################
 
     - name: Fix cache permissions
       run: |
         mkdir -p /github/home/.cache/pip
-        chmod -R 777 /github/home/.cache
+        chmod -R 777 /github/home/.cache || true
 
     ########################################
     # CACHE PIP
@@ -116,17 +121,17 @@ jobs:
         EOF
 
         cat urls.txt \
-        | xargs -I {} echo "{}" \
         | sed '/^$/d' \
+        | sort -u \
         > cleaned.txt
 
         mv cleaned.txt urls.txt
 
-        echo "==== URLS ===="
+        echo "========== URLS =========="
         cat urls.txt || true
 
     ########################################
-    # PLAYWRIGHT INTERCEPTOR
+    # CREATE INTERCEPTOR
     ########################################
 
     - name: Create interceptor
@@ -165,9 +170,9 @@ jobs:
                 ".css",
                 ".js",
                 "banner",
-                "doubleclick",
                 "ads",
-                "analytics"
+                "analytics",
+                "doubleclick"
             ]
 
             for b in bad:
@@ -249,7 +254,7 @@ jobs:
         PY
 
     ########################################
-    # DOWNLOAD
+    # DOWNLOAD VIDEOS
     ########################################
 
     - name: Download videos
@@ -264,9 +269,9 @@ jobs:
 
           (
 
-          echo "================================="
-          echo "PROCESSING $URL"
-          echo "================================="
+          echo "======================================"
+          echo "PROCESSING: $URL"
+          echo "======================================"
 
           TS=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
 
@@ -274,20 +279,20 @@ jobs:
 
           mkdir -p "$DIR"
 
-          ########################################
-          # STEP 1 YT-DLP
-          ########################################
+          ####################################
+          # STEP 1 NORMAL YT-DLP
+          ####################################
 
-          echo "STEP1 yt-dlp"
+          echo "STEP1 NORMAL YT-DLP"
 
           yt-dlp \
             --no-playlist \
             --ignore-errors \
             --continue \
-            --retries 20 \
-            --fragment-retries 20 \
-            --file-access-retries 20 \
-            --extractor-retries 20 \
+            --retries 30 \
+            --fragment-retries 30 \
+            --extractor-retries 30 \
+            --file-access-retries 30 \
             --retry-sleep 5 \
             --concurrent-fragments 4 \
             --hls-use-mpegts \
@@ -307,9 +312,9 @@ jobs:
             SIZE=$(stat -c%s "$FILE")
           fi
 
-          ########################################
+          ####################################
           # HARD MODE
-          ########################################
+          ####################################
 
           if [ -z "$FILE" ] || [ $SIZE -lt 5000000 ]; then
 
@@ -319,25 +324,27 @@ jobs:
 
             python3 intercept.py "$URL" > "$DIR/media.json"
 
-            echo "===== MEDIA ====="
-
+            echo "========== MEDIA =========="
             cat "$DIR/media.json" || true
 
             cat "$DIR/media.json" \
             | jq -r '.[].url' \
-            | grep -viE 'adtng|doubleclick|jerkmate|creative|banner|ads|preview|sprite|thumb' \
+            | grep -viE 'ads|banner|doubleclick|analytics|preview|thumb|sprite' \
             | sort -u \
             > "$DIR/all.txt"
 
-            ########################################
+            echo "========== FOUND URLS =========="
+            cat "$DIR/all.txt" || true
+
+            SUCCESS=0
+
+            ####################################
             # TRY HLS
-            ########################################
+            ####################################
 
             grep -i '\.m3u8' "$DIR/all.txt" \
             | grep -viE 'low|preview' \
             > "$DIR/m3u8.txt" || true
-
-            SUCCESS=0
 
             while read M
             do
@@ -346,7 +353,8 @@ jobs:
                 continue
               fi
 
-              echo "TRY HLS $M"
+              echo "TRY HLS"
+              echo "$M"
 
               yt-dlp \
                 --referer "$URL" \
@@ -358,18 +366,20 @@ jobs:
                 -f best \
                 --merge-output-format mp4 \
                 -o "$DIR/stream.%(ext)s" \
-                "$M" && SUCCESS=1 && break
+                "$M" \
+                && SUCCESS=1 && break
 
             done < "$DIR/m3u8.txt"
 
-            ########################################
+            ####################################
             # TRY MP4 / YOUTUBE DIRECT
-            ########################################
+            ####################################
 
             if [ $SUCCESS -eq 0 ]; then
 
               grep -Ei '\.mp4|videoplayback' "$DIR/all.txt" \
               | grep -viE 'preview|sample|thumb' \
+              | sort -u \
               > "$DIR/mp4.txt" || true
 
               while read M
@@ -379,16 +389,34 @@ jobs:
                   continue
                 fi
 
-                echo "TRY DIRECT VIDEO $M"
+                echo "TRY DIRECT VIDEO"
+                echo "$M"
 
-                wget \
-                  --tries=20 \
-                  --retry-connrefused \
-                  --waitretry=5 \
-                  --referer="$URL" \
-                  --user-agent="Mozilla/5.0" \
-                  -O "$DIR/video.mp4" \
-                  "$M" && SUCCESS=1 && break
+                ################################
+                # TRY YT-DLP DIRECT
+                ################################
+
+                yt-dlp \
+                  --ignore-errors \
+                  --no-check-certificates \
+                  --add-header "Referer:$URL" \
+                  --add-header "User-Agent:Mozilla/5.0" \
+                  -o "$DIR/direct.%(ext)s" \
+                  "$M" \
+                  && SUCCESS=1 && break
+
+                ################################
+                # FALLBACK CURL
+                ################################
+
+                curl -L \
+                  --retry 20 \
+                  --retry-delay 5 \
+                  -A "Mozilla/5.0" \
+                  -e "$URL" \
+                  "$M" \
+                  -o "$DIR/video.mp4" \
+                  && SUCCESS=1 && break
 
               done < "$DIR/mp4.txt"
 
@@ -396,9 +424,21 @@ jobs:
 
           fi
 
-          ########################################
-          # VALIDATE
-          ########################################
+          ####################################
+          # DEBUG FILES
+          ####################################
+
+          echo "====== DOWNLOADED FILES ======"
+
+          find "$DIR" -type f | sort || true
+
+          echo "====== FILE SIZES ======"
+
+          du -h "$DIR" || true
+
+          ####################################
+          # DELETE SMALL FILES
+          ####################################
 
           FILE=$(find "$DIR" -type f | sort | tail -n1 || true)
 
@@ -410,7 +450,7 @@ jobs:
 
             if [ $SIZE -lt 5000000 ]; then
 
-              echo "FILE TOO SMALL DELETE"
+              echo "DELETE SMALL FILE"
 
               rm -f "$FILE"
 
@@ -418,9 +458,9 @@ jobs:
 
           fi
 
-          ########################################
+          ####################################
           # SPLIT LARGE FILES
-          ########################################
+          ####################################
 
           FILE=$(find "$DIR" -type f -iname "*.mp4" | sort | tail -n1 || true)
 
@@ -449,7 +489,7 @@ jobs:
         wait
 
     ########################################
-    # GIT DEBUG
+    # DEBUG GIT
     ########################################
 
     - name: Debug git
