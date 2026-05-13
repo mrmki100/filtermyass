@@ -1,4 +1,4 @@
-name: Universal Video Downloader V15
+name: Universal Video Downloader V15 Ultimate
 
 on:
   workflow_dispatch:
@@ -16,8 +16,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+
   download:
+
     runs-on: ubuntu-latest
+
     timeout-minutes: 180
 
     env:
@@ -25,9 +28,9 @@ jobs:
 
     steps:
 
-      ####################################################################
-      # LIGHTWEIGHT CHECKOUT
-      ####################################################################
+########################################################################
+# CHECKOUT
+########################################################################
 
       - name: Checkout repository (minimal)
         uses: actions/checkout@v4
@@ -37,40 +40,49 @@ jobs:
           sparse-checkout: |
             downloads
 
-      ####################################################################
-      # CACHE
-      ####################################################################
+########################################################################
+# CACHE - PIP
+########################################################################
 
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-v15
+          key: ${{ runner.os }}-pip-v15-ultimate
           restore-keys: |
             ${{ runner.os }}-pip-
+
+########################################################################
+# CACHE - YT-DLP
+########################################################################
 
       - name: Cache yt-dlp
         uses: actions/cache@v4
         with:
           path: ~/.cache/yt-dlp
-          key: ${{ runner.os }}-ytdlp-v15
+          key: ${{ runner.os }}-ytdlp-v15-ultimate
           restore-keys: |
             ${{ runner.os }}-ytdlp-
+
+########################################################################
+# CACHE - TEMP
+########################################################################
 
       - name: Cache ffmpeg temp
         uses: actions/cache@v4
         with:
           path: temp
-          key: ${{ runner.os }}-ffmpeg-temp-v15
+          key: ${{ runner.os }}-temp-v15-ultimate
           restore-keys: |
-            ${{ runner.os }}-ffmpeg-temp-
+            ${{ runner.os }}-temp-
 
-      ####################################################################
-      # SYSTEM DEPENDENCIES
-      ####################################################################
+########################################################################
+# INSTALL DEPENDENCIES
+########################################################################
 
       - name: Install dependencies
         run: |
+
           sudo apt update
 
           sudo apt install -y \
@@ -81,7 +93,14 @@ jobs:
             aria2 \
             mediainfo \
             python3 \
-            python3-pip
+            python3-pip \
+            ca-certificates \
+            git \
+            tar \
+            gzip \
+            unzip
+
+          pip3 install --upgrade pip
 
           pip3 install -U \
             yt-dlp \
@@ -89,31 +108,44 @@ jobs:
             beautifulsoup4 \
             lxml
 
-      ####################################################################
-      # PREPARE
-      ####################################################################
+########################################################################
+# PREPARE WORKSPACE
+########################################################################
 
       - name: Prepare workspace
         run: |
+
           mkdir -p downloads
           mkdir -p temp
+
+          chmod -R 777 downloads || true
+          chmod -R 777 temp || true
 
           git config --global core.compression 9
           git config --global gc.auto 0
 
-      ####################################################################
-      # CREATE ADVANCED EXTRACTOR
-      ####################################################################
+          echo "WORKSPACE:"
+          pwd
+
+          echo "FILES:"
+          ls -la
+
+########################################################################
+# CREATE ADVANCED EXTRACTOR
+########################################################################
 
       - name: Create advanced extractor
         run: |
+
           cat > extractor.py << 'PY'
           import re
           import json
           import requests
           import sys
+
           from bs4 import BeautifulSoup
-          from urllib.parse import urljoin, urlparse
+          from urllib.parse import urljoin
+          from urllib.parse import urlparse
 
           TARGET = sys.argv[1]
 
@@ -122,12 +154,17 @@ jobs:
           DOMAIN = f"{parsed.scheme}://{parsed.netloc}"
 
           USER_AGENTS = [
+
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537.36",
+
               "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/137.0 Safari/537.36",
+
               "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile Safari/604.1"
+
           ]
 
           BAD_WORDS = [
+
               "ads",
               "doubleclick",
               "tracker",
@@ -149,9 +186,11 @@ jobs:
               ".woff",
               ".ttf",
               ".ico"
+
           ]
 
           PATTERNS = [
+
               r'https://[^"\']+\.m3u8[^"\']*',
               r'https://[^"\']+\.mp4[^"\']*',
               r'https://[^"\']+\.webm[^"\']*',
@@ -159,23 +198,28 @@ jobs:
               r'https://[^"\']+master\.m3u8[^"\']*',
               r'https://[^"\']+index\.m3u8[^"\']*',
               r'https://[^"\']+playlist[^"\']*\.m3u8[^"\']*',
+
           ]
 
           HEADERS_LIST = []
 
           for ua in USER_AGENTS:
+
               HEADERS_LIST.append({
+
                   "User-Agent": ua,
                   "Referer": TARGET,
                   "Origin": DOMAIN,
                   "Accept": "*/*",
                   "Accept-Language": "en-US,en;q=0.9",
                   "Connection": "keep-alive",
+
               })
 
           found = set()
 
           def valid(url):
+
               if not url:
                   return False
 
@@ -190,7 +234,10 @@ jobs:
               if " " in url:
                   return False
 
-              if "<" in url or ">" in url:
+              if "<" in url:
+                  return False
+
+              if ">" in url:
                   return False
 
               return True
@@ -226,12 +273,14 @@ jobs:
                   ]):
 
                       for attr in [
+
                           "src",
                           "href",
                           "data-src",
                           "data-video",
                           "data-hls",
                           "data-url"
+
                       ]:
 
                           val = tag.get(attr)
@@ -244,10 +293,12 @@ jobs:
                           if valid(val):
 
                               if any(x in val.lower() for x in [
+
                                   ".mp4",
                                   ".m3u8",
                                   ".webm",
                                   ".mkv"
+
                               ]):
 
                                   found.add(val)
@@ -265,33 +316,60 @@ jobs:
           print(json.dumps(clean, indent=2))
           PY
 
-      ####################################################################
-      # DOWNLOAD
-      ####################################################################
+########################################################################
+# DOWNLOAD VIDEO
+########################################################################
 
       - name: Download video
         env:
           URL: ${{ github.event.inputs.url }}
         run: |
+
           set +e
+
+########################################################################
+# INFO
+########################################################################
 
           echo "=================================================="
           echo "TARGET URL"
           echo "=================================================="
+
           echo "$URL"
+
+          echo "=================================================="
+          echo "CURRENT DIRECTORY"
+          echo "=================================================="
+
+          pwd
+
+          echo "=================================================="
+          echo "FILES BEFORE DOWNLOAD"
+          echo "=================================================="
+
+          find . -maxdepth 2 -type f || true
+
+########################################################################
+# DOMAIN
+########################################################################
 
           DOMAIN=$(echo "$URL" | awk -F/ '{print $1"//"$3}')
 
           echo "=================================================="
           echo "DOMAIN"
           echo "=================================================="
+
           echo "$DOMAIN"
 
-          cd downloads
+########################################################################
+# USER AGENT
+########################################################################
 
-          ##################################################################
-          # ATTEMPT 1
-          ##################################################################
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137 Safari/537.36"
+
+########################################################################
+# ATTEMPT 1
+########################################################################
 
           echo "=================================================="
           echo "ATTEMPT 1 - STANDARD YT-DLP"
@@ -315,8 +393,8 @@ jobs:
             --geo-bypass \
             --no-check-certificates \
             --restrict-filenames \
-            --no-call-home \
-            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537.36" \
+            --format "bv*+ba/b/best" \
+            --user-agent "$UA" \
             --referer "$URL" \
             --add-header "Origin:$DOMAIN" \
             --add-header "Accept:*/*" \
@@ -326,18 +404,48 @@ jobs:
             --add-header "Sec-Fetch-Dest:empty" \
             --add-header "Sec-Fetch-Mode:cors" \
             --add-header "Sec-Fetch-Site:same-origin" \
-            -o "video.%(ext)s" \
+            -o "downloads/video_%(id)s.%(ext)s" \
             "$URL"
 
-          ##################################################################
-          # CHECK FILES
-          ##################################################################
+########################################################################
+# RECOVERY
+########################################################################
+
+          echo "=================================================="
+          echo "RECOVER FILES"
+          echo "=================================================="
+
+          ROOT_COUNT=$(find . -maxdepth 1 -type f \( \
+            -iname "*.mp4" -o \
+            -iname "*.mkv" -o \
+            -iname "*.webm" -o \
+            -iname "*.mov" \
+          \) | wc -l)
+
+          echo "ROOT FILES: $ROOT_COUNT"
+
+          if [ "$ROOT_COUNT" -gt "0" ]; then
+
+            echo "MOVING ROOT FILES TO DOWNLOADS"
+
+            find . -maxdepth 1 -type f \( \
+              -iname "*.mp4" -o \
+              -iname "*.mkv" -o \
+              -iname "*.webm" -o \
+              -iname "*.mov" \
+            \) -exec mv {} downloads/ \;
+
+          fi
+
+########################################################################
+# CHECK FILES
+########################################################################
 
           echo "=================================================="
           echo "CHECKING FILES"
           echo "=================================================="
 
-          COUNT=$(find . -type f \( \
+          COUNT=$(find downloads -type f \( \
             -iname "*.mp4" -o \
             -iname "*.mkv" -o \
             -iname "*.webm" -o \
@@ -346,9 +454,37 @@ jobs:
 
           echo "FOUND FILES: $COUNT"
 
-          ##################################################################
-          # FALLBACK EXTRACTOR
-          ##################################################################
+########################################################################
+# REMOVE SMALL FILES
+########################################################################
+
+          echo "=================================================="
+          echo "REMOVE SMALL FILES"
+          echo "=================================================="
+
+          find downloads -type f \( \
+            -iname "*.mp4" -o \
+            -iname "*.mkv" -o \
+            -iname "*.webm" -o \
+            -iname "*.mov" \
+          \) -size -1M -delete || true
+
+########################################################################
+# RECHECK
+########################################################################
+
+          COUNT=$(find downloads -type f \( \
+            -iname "*.mp4" -o \
+            -iname "*.mkv" -o \
+            -iname "*.webm" -o \
+            -iname "*.mov" \
+          \) | wc -l)
+
+          echo "FILES AFTER CLEANUP: $COUNT"
+
+########################################################################
+# FALLBACK
+########################################################################
 
           if [ "$COUNT" -eq "0" ]; then
 
@@ -356,15 +492,13 @@ jobs:
             echo "ATTEMPT 2 - CUSTOM EXTRACTOR"
             echo "=================================================="
 
-            cd ..
-
             python3 extractor.py "$URL" > links.json
 
             echo "=================================================="
             echo "FOUND MEDIA LINKS"
             echo "=================================================="
 
-            cat links.json
+            cat links.json || true
 
             TOTAL=$(jq length links.json)
 
@@ -380,10 +514,13 @@ jobs:
 
                 echo "=================================================="
                 echo "TRYING LINK $INDEX"
-                echo "$LINK"
                 echo "=================================================="
 
-                cd downloads
+                echo "$LINK"
+
+########################################################################
+# FALLBACK YT-DLP
+########################################################################
 
                 yt-dlp \
                   --ignore-errors \
@@ -393,46 +530,62 @@ jobs:
                   --downloader ffmpeg \
                   --hls-use-mpegts \
                   --merge-output-format mp4 \
-                  --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537.36" \
+                  --user-agent "$UA" \
                   --referer "$URL" \
                   --add-header "Origin:$DOMAIN" \
-                  -o "fallback_${INDEX}.%(ext)s" \
+                  -o "downloads/fallback_${INDEX}.%(ext)s" \
                   "$LINK"
 
-                CHECK=$(find . -type f \( \
+########################################################################
+# CHECK AFTER YT-DLP
+########################################################################
+
+                CHECK=$(find downloads -type f \( \
                   -iname "*.mp4" -o \
                   -iname "*.mkv" -o \
                   -iname "*.webm" \
                 \) | wc -l)
 
                 if [ "$CHECK" -gt "0" ]; then
-                  echo "SUCCESS"
+
+                  echo "YT-DLP FALLBACK SUCCESS"
+
                   break
+
                 fi
 
+########################################################################
+# FFMPEG DIRECT
+########################################################################
+
                 echo "=================================================="
-                echo "TRYING FFMPEG DIRECT"
+                echo "TRYING DIRECT FFMPEG"
                 echo "=================================================="
 
                 ffmpeg \
                   -loglevel error \
-                  -headers "Referer: $URL\r\nOrigin: $DOMAIN\r\nUser-Agent: Mozilla/5.0\r\n" \
+                  -headers "Referer: $URL\r\nOrigin: $DOMAIN\r\nUser-Agent: $UA\r\n" \
                   -i "$LINK" \
                   -c copy \
-                  "ffmpeg_${INDEX}.mp4"
+                  "downloads/ffmpeg_${INDEX}.mp4"
 
-                CHECK2=$(find . -type f \( \
+########################################################################
+# CHECK AFTER FFMPEG
+########################################################################
+
+                CHECK2=$(find downloads -type f \( \
                   -iname "*.mp4" -o \
                   -iname "*.mkv" -o \
                   -iname "*.webm" \
                 \) | wc -l)
 
                 if [ "$CHECK2" -gt "0" ]; then
-                  echo "FFMPEG SUCCESS"
-                  break
-                fi
 
-                cd ..
+                  echo "FFMPEG SUCCESS"
+
+                  break
+
+                fi
 
                 INDEX=$((INDEX+1))
 
@@ -442,9 +595,39 @@ jobs:
 
           fi
 
-          ##################################################################
-          # FINAL CHECK
-          ##################################################################
+########################################################################
+# FINAL RECOVERY
+########################################################################
+
+          echo "=================================================="
+          echo "FINAL RECOVERY"
+          echo "=================================================="
+
+          find . -type f \( \
+            -iname "*.mp4" -o \
+            -iname "*.mkv" -o \
+            -iname "*.webm" -o \
+            -iname "*.mov" \
+          \) | while read FILE
+          do
+
+            BASENAME=$(basename "$FILE")
+
+            if [ ! -f "downloads/$BASENAME" ]; then
+
+              if [[ "$FILE" != downloads/* ]]; then
+
+                mv "$FILE" "downloads/$BASENAME" || true
+
+              fi
+
+            fi
+
+          done
+
+########################################################################
+# FINAL RESULT
+########################################################################
 
           echo "=================================================="
           echo "FINAL RESULT"
@@ -461,22 +644,32 @@ jobs:
 
           echo "FINAL VIDEO COUNT: $FINAL"
 
+########################################################################
+# FAIL IF EMPTY
+########################################################################
+
           if [ "$FINAL" -eq "0" ]; then
+
             echo "NO VIDEO DOWNLOADED"
+
             exit 1
+
           fi
 
-      ####################################################################
-      # SHOW INFO
-      ####################################################################
+########################################################################
+# MEDIA INFO
+########################################################################
 
       - name: Media info
         run: |
+
           echo "=================================================="
-          echo "MEDIA INFORMATION"
+          echo "MEDIA INFO"
           echo "=================================================="
 
-          find downloads -type f | while read FILE; do
+          find downloads -type f | while read FILE
+          do
+
             echo "--------------------------------------"
             echo "$FILE"
             echo "--------------------------------------"
@@ -484,18 +677,36 @@ jobs:
             mediainfo "$FILE" || true
 
             echo
+
           done
 
-      ####################################################################
-      # GIT COMMIT
-      ####################################################################
+########################################################################
+# GIT STATUS
+########################################################################
+
+      - name: Git status
+        run: |
+
+          echo "=================================================="
+          echo "GIT STATUS"
+          echo "=================================================="
+
+          git status || true
+
+########################################################################
+# COMMIT
+########################################################################
 
       - name: Commit downloaded videos
         run: |
+
           git config --global user.name "github-actions[bot]"
+
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add downloads/* || true
+
+          git status || true
 
           git diff --cached --quiet && echo "NO CHANGES" && exit 0
 
@@ -503,9 +714,9 @@ jobs:
 
           git push
 
-      ####################################################################
-      # ARTIFACT BACKUP
-      ####################################################################
+########################################################################
+# ARTIFACT BACKUP
+########################################################################
 
       - name: Upload artifact backup
         uses: actions/upload-artifact@v4
