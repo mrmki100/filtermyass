@@ -1,493 +1,388 @@
-name: Video Downloader V4 Fixed Fast
+name: Download Videos V4 Fixed Fast
 
 on:
   workflow_dispatch:
-    inputs:
-      url1:
-        description: "Video URL 1"
-        required: false
-      url2:
-        description: "Video URL 2"
-        required: false
-      url3:
-        description: "Video URL 3"
-        required: false
-      url4:
-        description: "Video URL 4"
-        required: false
-      url5:
-        description: "Video URL 5"
-        required: false
 
 permissions:
   contents: write
 
+concurrency:
+  group: download-videos
+  cancel-in-progress: false
+
 jobs:
-
   download:
-
     runs-on: ubuntu-latest
-
-    timeout-minutes: 360
 
     container:
       image: mcr.microsoft.com/playwright/python:v1.59.0-noble
 
+    timeout-minutes: 360
+
+    defaults:
+      run:
+        shell: bash
+
     steps:
 
-    ########################################################
-    # CHECKOUT
-    ########################################################
-
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    ########################################################
-    # FIX CACHE PERMISSIONS
-    ########################################################
-
-    - name: Fix cache permissions
-      run: |
-        mkdir -p /github/home/.cache/pip
-        chmod -R 777 /github/home/.cache
-
-    ########################################################
-    # CACHE PIP
-    ########################################################
-
-    - name: Cache pip
-      uses: actions/cache@v4
-      with:
-        path: /github/home/.cache/pip
-        key: ${{ runner.os }}-pip-v4fixed-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-v4fixed-
-
-    ########################################################
-    # CACHE PLAYWRIGHT
-    ########################################################
-
-    - name: Cache Playwright
-      uses: actions/cache@v4
-      with:
-        path: /ms-playwright
-        key: ${{ runner.os }}-playwright-v4fixed
-
-    ########################################################
-    # REQUIREMENTS
-    ########################################################
-
-    - name: Create requirements
-      run: |
-
-        cat > requirements.txt <<EOF
-        yt-dlp
-        playwright
-        EOF
-
-    ########################################################
-    # INSTALL PYTHON PACKAGES
-    ########################################################
-
-    - name: Install python packages
-      run: |
-
-        python3 -m pip install --upgrade pip
-
-        pip install -r requirements.txt
-
-    ########################################################
-    # INSTALL TOOLS
-    ########################################################
-
-    - name: Install tools
-      run: |
-
-        apt-get update
-
-        apt-get install -y --no-install-recommends \
-          p7zip-full \
-          jq \
-          wget
-
-    ########################################################
-    # PREPARE URLS
-    ########################################################
-
-    - name: Prepare URLs
-      run: |
-
-        cat > urls.txt <<EOF
-        ${{ github.event.inputs.url1 }}
-        ${{ github.event.inputs.url2 }}
-        ${{ github.event.inputs.url3 }}
-        ${{ github.event.inputs.url4 }}
-        ${{ github.event.inputs.url5 }}
-        EOF
-
-        sed -i '/^$/d' urls.txt
-
-        echo "============== URLS =============="
-
-        cat urls.txt
-
-    ########################################################
-    # CREATE INTERCEPTOR
-    ########################################################
-
-    - name: Create interceptor
-      run: |
-
-        cat > intercept.py << 'PY'
-
-        import sys
-        import json
-
-        from playwright.sync_api import sync_playwright
-
-        url = sys.argv[1]
-
-        media = []
-
-        def valid(u):
-
-            good = [
-                ".m3u8",
-                ".mp4",
-                ".mpd",
-                "playlist",
-                "manifest",
-                "videoplayback"
-            ]
-
-            bad = [
-                ".jpg",
-                ".jpeg",
-                ".png",
-                ".gif",
-                ".svg",
-                ".css",
-                ".js",
-                "doubleclick",
-                "banner",
-                "ads",
-                "analytics",
-                "tracker"
-            ]
-
-            ul = u.lower()
-
-            for b in bad:
-                if b in ul:
-                    return False
-
-            for g in good:
-                if g in ul:
-                    return True
-
-            return False
-
-        with sync_playwright() as p:
-
-            browser = p.chromium.launch(
-                headless=True
-            )
-
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
-            )
-
-            page = context.new_page()
-
-            def handle_response(r):
-
-                try:
-
-                    u = r.url
-
-                    ct = r.headers.get("content-type", "")
-
-                    if valid(u) or "video" in ct or "mpegurl" in ct:
-
-                        media.append({
-                            "url": u,
-                            "type": ct
-                        })
-
-                except:
-                    pass
-
-            page.on("response", handle_response)
-
-            page.goto(
-                url,
-                timeout=120000,
-                wait_until="domcontentloaded"
-            )
-
-            try:
-                page.mouse.click(640, 360)
-            except:
-                pass
-
-            try:
-                page.locator("video").click(timeout=10000)
-            except:
-                pass
-
-            page.wait_for_timeout(60000)
-
-            browser.close()
-
-        uniq = []
-        seen = set()
-
-        for m in media:
-
-            if m["url"] not in seen:
-
-                seen.add(m["url"])
-
-                uniq.append(m)
-
-        print(json.dumps(uniq))
-
-        PY
-
-    ########################################################
-    # DOWNLOAD VIDEOS
-    ########################################################
-
-    - name: Download videos
-      run: |
-
-        mkdir -p downloads
-
-        while IFS= read -r URL
-        do
-
-          (
+      ##################################################
+      # CHECKOUT
+      ##################################################
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      ##################################################
+      # DEBUG ENVIRONMENT
+      ##################################################
+
+      - name: Debug environment
+        run: |
 
           echo "================================="
-          echo "START $URL"
+          echo "SYSTEM INFO"
           echo "================================="
 
-          TS=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
+          whoami
+          pwd
 
-          DIR="downloads/$TS"
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
 
-          mkdir -p "$DIR"
+          ls -la
+          df -h
 
-          ####################################################
-          # DIRECT DOWNLOAD
-          ####################################################
+      ##################################################
+      # FIX CACHE PERMISSIONS
+      ##################################################
 
-          echo "DIRECT yt-dlp"
+      - name: Fix cache permissions
+        run: |
 
-          yt-dlp \
-            --no-playlist \
-            --user-agent "Mozilla/5.0" \
-            --referer "$URL" \
-            --add-header "Referer:$URL" \
-            --add-header "User-Agent:Mozilla/5.0" \
-            --retries 20 \
-            --fragment-retries 20 \
-            --retry-sleep 5 \
-            --concurrent-fragments 4 \
-            --hls-use-mpegts \
-            --downloader ffmpeg \
-            --merge-output-format mp4 \
-            -f "bestvideo+bestaudio/best" \
-            -o "$DIR/%(title).120s_%(id)s.%(ext)s" \
-            "$URL" || true
+          mkdir -p /github/home/.cache/pip
 
-          FILE=$(find "$DIR" -type f -iname "*.mp4" | sort | tail -n1 || true)
+          chmod -R 777 /github/home/.cache
 
-          SIZE=0
+      ##################################################
+      # CACHE PIP
+      ##################################################
 
-          if [ ! -z "$FILE" ]; then
-            SIZE=$(stat -c%s "$FILE")
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: /github/home/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
+      ##################################################
+      # CACHE PLAYWRIGHT
+      ##################################################
+
+      - name: Cache Playwright
+        uses: actions/cache@v4
+        with:
+          path: /ms-playwright
+          key: playwright-${{ runner.os }}
+
+      ##################################################
+      # INSTALL TOOLS
+      ##################################################
+
+      - name: Install tools
+        run: |
+
+          apt-get update
+
+          apt-get install -y --no-install-recommends \
+            ffmpeg \
+            aria2 \
+            jq \
+            wget \
+            curl \
+            p7zip-full
+
+      ##################################################
+      # PYTHON INFO
+      ##################################################
+
+      - name: Python info
+        run: |
+
+          python --version
+          pip --version
+
+      ##################################################
+      # INSTALL PYTHON PACKAGES
+      ##################################################
+
+      - name: Install Python packages
+        run: |
+
+          pip install --upgrade pip
+
+          pip install \
+            yt-dlp \
+            requests \
+            aiohttp
+
+      ##################################################
+      # CREATE FOLDERS
+      ##################################################
+
+      - name: Create folders
+        run: |
+
+          mkdir -p downloads
+          mkdir -p temp
+
+      ##################################################
+      # SHOW INPUT FILES
+      ##################################################
+
+      - name: Show input files
+        run: |
+
+          echo "================================="
+          echo "FILES"
+          echo "================================="
+
+          ls -la
+
+          echo "================================="
+          echo "urls.txt"
+          echo "================================="
+
+          cat urls.txt || true
+
+          echo "================================="
+          echo "m3u8.txt"
+          echo "================================="
+
+          cat m3u8.txt || true
+
+      ##################################################
+      # DOWNLOAD NORMAL URLS
+      ##################################################
+
+      - name: Download videos
+        run: |
+
+          set -e
+
+          if [ ! -f urls.txt ]; then
+            echo "urls.txt not found"
+            exit 0
           fi
 
-          ####################################################
-          # HARD MODE
-          ####################################################
+          while IFS= read -r url || [ -n "$url" ]; do
 
-          if [ -z "$FILE" ] || [ "$SIZE" -lt 5000000 ]; then
+            url=$(echo "$url" | xargs)
 
-            echo "ENTER HARD MODE"
+            [ -z "$url" ] && continue
 
-            rm -f "$DIR"/* || true
+            echo "================================="
+            echo "DOWNLOADING VIDEO"
+            echo "$url"
+            echo "================================="
 
-            ####################################################
-            # INTERCEPT MEDIA
-            ####################################################
+            yt-dlp \
+              --ignore-errors \
+              --no-progress \
+              --continue \
+              --retries 20 \
+              --fragment-retries 20 \
+              --file-access-retries 20 \
+              --concurrent-fragments 4 \
+              --extractor-retries 20 \
+              --retry-sleep 5 \
+              --no-part \
+              --merge-output-format mp4 \
+              --restrict-filenames \
+              -o "downloads/%(title)s.%(ext)s" \
+              "$url"
 
-            python3 intercept.py "$URL" > "$DIR/media.json"
+          done < urls.txt
 
-            echo "============== MEDIA =============="
+      ##################################################
+      # DOWNLOAD HLS / M3U8
+      ##################################################
 
-            cat "$DIR/media.json"
+      - name: Download HLS streams
+        run: |
 
-            ####################################################
-            # EXTRACT URLS
-            ####################################################
+          set -e
 
-            cat "$DIR/media.json" \
-            | jq -r '.[].url' \
-            | grep -viE 'doubleclick|ads|banner|preview|sprite|thumb|analytics' \
-            | sort -u \
-            > "$DIR/all.txt"
+          if [ ! -f m3u8.txt ]; then
+            echo "m3u8.txt not found"
+            exit 0
+          fi
 
-            ####################################################
-            # TRY M3U8 FIRST
-            ####################################################
+          while IFS= read -r url || [ -n "$url" ]; do
 
-            grep -i '\.m3u8' "$DIR/all.txt" \
-            | grep -viE 'low|preview' \
-            > "$DIR/m3u8.txt" || true
+            url=$(echo "$url" | xargs)
 
-            SUCCESS=0
+            [ -z "$url" ] && continue
 
-            while read M
-            do
+            echo "================================="
+            echo "PROCESSING M3U8"
+            echo "$url"
+            echo "================================="
 
-              if [ -z "$M" ]; then
-                continue
-              fi
+            CLEAN_URL=$(echo "$url" | grep -viE 'low|preview' || true)
 
-              echo "============== TRY HLS =============="
-              echo "$M"
-
-              yt-dlp \
-                --referer "$URL" \
-                --add-header "Referer:$URL" \
-                --add-header "User-Agent:Mozilla/5.0" \
-                --retries 20 \
-                --fragment-retries 20 \
-                --retry-sleep 5 \
-                --concurrent-fragments 4 \
-                --hls-use-mpegts \
-                --downloader ffmpeg \
-                --merge-output-format mp4 \
-                -f best \
-                -o "$DIR/stream.%(ext)s" \
-                "$M" && SUCCESS=1 && break
-
-            done < "$DIR/m3u8.txt"
-
-            ####################################################
-            # MP4 FALLBACK
-            ####################################################
-
-            if [ "$SUCCESS" -eq 0 ]; then
-
-              grep -i '\.mp4' "$DIR/all.txt" \
-              | grep -viE 'preview|sample|thumb' \
-              > "$DIR/mp4.txt" || true
-
-              while read M
-              do
-
-                if [ -z "$M" ]; then
-                  continue
-                fi
-
-                echo "============== TRY MP4 =============="
-                echo "$M"
-
-                wget \
-                  --tries=20 \
-                  --retry-connrefused \
-                  --waitretry=5 \
-                  --referer="$URL" \
-                  --user-agent="Mozilla/5.0" \
-                  -O "$DIR/video.mp4" \
-                  "$M" && SUCCESS=1 && break
-
-              done < "$DIR/mp4.txt"
-
+            if [ -z "$CLEAN_URL" ]; then
+              echo "Skipped filtered URL"
+              continue
             fi
 
+            yt-dlp \
+              --ignore-errors \
+              --no-progress \
+              --continue \
+              --retries 20 \
+              --fragment-retries 20 \
+              --file-access-retries 20 \
+              --concurrent-fragments 4 \
+              --extractor-retries 20 \
+              --retry-sleep 5 \
+              --hls-use-mpegts \
+              --merge-output-format mp4 \
+              --restrict-filenames \
+              -o "downloads/%(title)s.%(ext)s" \
+              "$CLEAN_URL"
+
+          done < m3u8.txt
+
+      ##################################################
+      # SHOW RESULTS
+      ##################################################
+
+      - name: Show results
+        run: |
+
+          echo "================================="
+          echo "DOWNLOADED FILES"
+          echo "================================="
+
+          find downloads -type f || true
+
+          echo "================================="
+          echo "DOWNLOAD SIZE"
+          echo "================================="
+
+          du -sh downloads || true
+
+      ##################################################
+      # VERIFY GIT REPOSITORY
+      ##################################################
+
+      - name: Verify git repository
+        run: |
+
+          echo "================================="
+          echo "VERIFY GIT"
+          echo "================================="
+
+          cd "$GITHUB_WORKSPACE"
+
+          pwd
+
+          ls -la
+
+          if [ ! -d ".git" ]; then
+            echo "ERROR: .git directory not found"
+            exit 1
           fi
 
-          ####################################################
-          # VALIDATE OUTPUT
-          ####################################################
+          git status
 
-          FILE=$(find "$DIR" -type f -iname "*.mp4" | sort | tail -n1 || true)
+      ##################################################
+      # COMMIT DOWNLOADS
+      ##################################################
 
-          if [ ! -z "$FILE" ]; then
+      - name: Commit downloads
+        run: |
 
-            SIZE=$(stat -c%s "$FILE")
+          set -e
 
-            echo "FINAL SIZE: $SIZE"
+          echo "================================="
+          echo "COMMIT STEP"
+          echo "================================="
 
-            if [ "$SIZE" -lt 5000000 ]; then
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
 
-              echo "DELETE SMALL FILE"
+          cd "$GITHUB_WORKSPACE"
 
-              rm -f "$FILE"
+          pwd
 
-            fi
+          ls -la
+
+          if [ ! -d ".git" ]; then
+            echo "ERROR: .git folder not found"
+            exit 1
+          fi
+
+          ################################################
+          # FIX SAFE DIRECTORY
+          ################################################
+
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          ################################################
+          # CONFIGURE GIT
+          ################################################
+
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          ################################################
+          # STATUS
+          ################################################
+
+          git status
+
+          ################################################
+          # ENSURE FOLDER EXISTS
+          ################################################
+
+          mkdir -p downloads
+
+          ################################################
+          # ADD FILES
+          ################################################
+
+          git add downloads || true
+
+          ################################################
+          # COMMIT ONLY IF CHANGED
+          ################################################
+
+          if git diff --cached --quiet; then
+
+            echo "No changes to commit"
+
+          else
+
+            git commit -m "videos downloaded"
+
+            git push
 
           fi
 
-          ####################################################
-          # SPLIT LARGE FILES
-          ####################################################
+      ##################################################
+      # FINAL STATUS
+      ##################################################
 
-          FILE=$(find "$DIR" -type f -iname "*.mp4" | sort | tail -n1 || true)
+      - name: Final status
+        run: |
 
-          if [ ! -z "$FILE" ]; then
+          echo "================================="
+          echo "FINAL GIT STATUS"
+          echo "================================="
 
-            SIZE=$(stat -c%s "$FILE")
+          cd "$GITHUB_WORKSPACE"
 
-            if [ "$SIZE" -gt 95000000 ]; then
-
-              echo "SPLIT LARGE FILE"
-
-              7z a -v90m "$DIR/video.7z" "$FILE"
-
-              rm -f "$FILE"
-
-            fi
-
-          fi
-
-          echo "DONE $URL"
-
-          ) &
-
-        done < urls.txt
-
-        wait
-
-    ########################################################
-    # SHOW RESULTS
-    ########################################################
-
-    - name: Show results
-      run: |
-
-        echo "============== DOWNLOADED FILES =============="
-
-        find downloads -type f || true
-
-    ########################################################
-    # COMMIT DOWNLOADS
-    ########################################################
-
-    - name: Commit downloads
-      run: |
-
-        cd "$GITHUB_WORKSPACE"
-
-        git config user.name github-actions
-        git config user.email github-actions@github.com
-
-        git add downloads
-
-        git commit -m "videos downloaded" || echo "nothing to commit"
-
-        git push
+          git status || true
