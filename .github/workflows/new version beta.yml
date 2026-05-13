@@ -22,27 +22,91 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: downloader
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
   download:
+
     runs-on: ubuntu-latest
+
+    container:
+      image: mcr.microsoft.com/playwright/python:v1.59.0-noble
+
     timeout-minutes: 360
 
     steps:
 
-    - uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        persist-credentials: true
+
+    ########################################
+    # FIX CACHE PERMISSIONS
+    ########################################
+
+    - name: Fix cache permissions
+      run: |
+        mkdir -p /github/home/.cache/pip
+        chmod -R 777 /github/home/.cache
+
+    ########################################
+    # CACHE PIP
+    ########################################
+
+    - name: Cache pip
+      uses: actions/cache@v4
+      with:
+        path: /github/home/.cache/pip
+        key: pip-${{ runner.os }}
+
+    ########################################
+    # CACHE PLAYWRIGHT
+    ########################################
+
+    - name: Cache Playwright
+      uses: actions/cache@v4
+      with:
+        path: /ms-playwright
+        key: playwright-${{ runner.os }}
+
+    ########################################
+    # INSTALL TOOLS
+    ########################################
 
     - name: Install tools
       run: |
+
+        set -e
+
+        apt-get update
+
+        apt-get install -y \
+          ffmpeg \
+          wget \
+          curl \
+          jq \
+          aria2 \
+          p7zip-full
+
         python3 -m pip install --upgrade pip
+
         pip install -U yt-dlp playwright
 
-        sudo apt-get update
-        sudo apt-get install -y ffmpeg wget jq p7zip-full curl
-
-        playwright install chromium
+    ########################################
+    # PREPARE URLS
+    ########################################
 
     - name: Prepare URLs
       run: |
+
         cat > urls.txt <<EOF
         ${{ github.event.inputs.url1 }}
         ${{ github.event.inputs.url2 }}
@@ -51,19 +115,38 @@ jobs:
         ${{ github.event.inputs.url5 }}
         EOF
 
-        sed -i '/^$/d' urls.txt
+        cat urls.txt \
+        | xargs -I {} echo "{}" \
+        | sed '/^$/d' \
+        > cleaned.txt
 
-    - name: Create network interceptor
+        mv cleaned.txt urls.txt
+
+        echo "==== URLS ===="
+        cat urls.txt || true
+
+    ########################################
+    # PLAYWRIGHT INTERCEPTOR
+    ########################################
+
+    - name: Create interceptor
       run: |
+
         cat > intercept.py << 'PY'
+
         import sys
         import json
+
         from playwright.sync_api import sync_playwright
 
         url = sys.argv[1]
+
         media = []
 
         def valid(u):
+
+            ul = u.lower()
+
             good = [
                 ".mp4",
                 ".m3u8",
@@ -75,17 +158,17 @@ jobs:
 
             bad = [
                 ".jpg",
+                ".jpeg",
                 ".png",
                 ".gif",
+                ".svg",
                 ".css",
                 ".js",
-                ".svg",
                 "banner",
+                "doubleclick",
                 "ads",
-                "doubleclick"
+                "analytics"
             ]
-
-            ul = u.lower()
 
             for b in bad:
                 if b in ul:
@@ -99,7 +182,9 @@ jobs:
 
         with sync_playwright() as p:
 
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(
+                headless=True
+            )
 
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
@@ -107,20 +192,25 @@ jobs:
 
             page = context.new_page()
 
-            def resp(r):
+            def handle_response(r):
+
                 try:
+
                     u = r.url
+
                     ct = r.headers.get("content-type", "")
 
                     if valid(u) or "video" in ct or "mpegurl" in ct:
+
                         media.append({
                             "url": u,
                             "type": ct
                         })
+
                 except:
                     pass
 
-            page.on("response", resp)
+            page.on("response", handle_response)
 
             page.goto(
                 url,
@@ -142,19 +232,30 @@ jobs:
 
             browser.close()
 
-        uniq = []
+        unique = []
+
         seen = set()
 
         for m in media:
-            if m["url"] not in seen:
-                seen.add(m["url"])
-                uniq.append(m)
 
-        print(json.dumps(uniq))
+            if m["url"] not in seen:
+
+                seen.add(m["url"])
+
+                unique.append(m)
+
+        print(json.dumps(unique))
+
         PY
+
+    ########################################
+    # DOWNLOAD
+    ########################################
 
     - name: Download videos
       run: |
+
+        set -e
 
         mkdir -p downloads
 
@@ -162,16 +263,20 @@ jobs:
         do
 
           (
+
+          echo "================================="
           echo "PROCESSING $URL"
+          echo "================================="
 
           TS=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
+
           DIR="downloads/$TS"
 
           mkdir -p "$DIR"
 
-          ################################
-          # STEP 1 DIRECT YT-DLP
-          ################################
+          ########################################
+          # STEP 1 YT-DLP
+          ########################################
 
           echo "STEP1 yt-dlp"
 
@@ -202,9 +307,9 @@ jobs:
             SIZE=$(stat -c%s "$FILE")
           fi
 
-          ################################
+          ########################################
           # HARD MODE
-          ################################
+          ########################################
 
           if [ -z "$FILE" ] || [ $SIZE -lt 5000000 ]; then
 
@@ -214,7 +319,9 @@ jobs:
 
             python3 intercept.py "$URL" > "$DIR/media.json"
 
-            cat "$DIR/media.json"
+            echo "===== MEDIA ====="
+
+            cat "$DIR/media.json" || true
 
             cat "$DIR/media.json" \
             | jq -r '.[].url' \
@@ -222,9 +329,9 @@ jobs:
             | sort -u \
             > "$DIR/all.txt"
 
-            ################################
-            # TRY M3U8
-            ################################
+            ########################################
+            # TRY HLS
+            ########################################
 
             grep -i '\.m3u8' "$DIR/all.txt" \
             | grep -viE 'low|preview' \
@@ -255,13 +362,13 @@ jobs:
 
             done < "$DIR/m3u8.txt"
 
-            ################################
-            # TRY MP4
-            ################################
+            ########################################
+            # TRY MP4 / YOUTUBE DIRECT
+            ########################################
 
             if [ $SUCCESS -eq 0 ]; then
 
-              grep -i '\.mp4' "$DIR/all.txt" \
+              grep -Ei '\.mp4|videoplayback' "$DIR/all.txt" \
               | grep -viE 'preview|sample|thumb' \
               > "$DIR/mp4.txt" || true
 
@@ -272,7 +379,7 @@ jobs:
                   continue
                 fi
 
-                echo "TRY MP4 $M"
+                echo "TRY DIRECT VIDEO $M"
 
                 wget \
                   --tries=20 \
@@ -289,25 +396,31 @@ jobs:
 
           fi
 
-          ################################
+          ########################################
           # VALIDATE
-          ################################
+          ########################################
 
-          FILE=$(find "$DIR" -type f -iname "*.mp4" | sort | tail -n1 || true)
+          FILE=$(find "$DIR" -type f | sort | tail -n1 || true)
 
           if [ ! -z "$FILE" ]; then
 
             SIZE=$(stat -c%s "$FILE")
 
+            echo "FILE SIZE = $SIZE"
+
             if [ $SIZE -lt 5000000 ]; then
+
+              echo "FILE TOO SMALL DELETE"
+
               rm -f "$FILE"
+
             fi
 
           fi
 
-          ################################
-          # SPLIT BIG FILE
-          ################################
+          ########################################
+          # SPLIT LARGE FILES
+          ########################################
 
           FILE=$(find "$DIR" -type f -iname "*.mp4" | sort | tail -n1 || true)
 
@@ -317,9 +430,11 @@ jobs:
 
             if [ $SIZE -gt 95000000 ]; then
 
+              echo "SPLIT LARGE FILE"
+
               7z a -v90m "$DIR/video.7z" "$FILE"
 
-              rm "$FILE"
+              rm -f "$FILE"
 
             fi
 
@@ -333,14 +448,57 @@ jobs:
 
         wait
 
+    ########################################
+    # GIT DEBUG
+    ########################################
+
+    - name: Debug git
+      run: |
+
+        pwd
+
+        ls -la
+
+        cd "$GITHUB_WORKSPACE"
+
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+        git status || true
+
+    ########################################
+    # COMMIT
+    ########################################
+
     - name: Commit downloads
       run: |
 
-        git config user.name github-actions
-        git config user.email github-actions@github.com
+        set -e
 
-        git add downloads
+        cd "$GITHUB_WORKSPACE"
 
-        git commit -m "videos downloaded" || echo "nothing to commit"
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-        git push
+        git config user.name "github-actions"
+
+        git config user.email "github-actions@github.com"
+
+        if [ ! -d ".git" ]; then
+          echo ".git missing"
+          exit 1
+        fi
+
+        git status
+
+        git add downloads || true
+
+        if git diff --cached --quiet; then
+
+          echo "NO CHANGES"
+
+        else
+
+          git commit -m "videos downloaded"
+
+          git push
+
+        fi
