@@ -1,4 +1,4 @@
-name: V10 Ultra Stealth Downloader
+name: V10 Stable Downloader
 
 on:
   workflow_dispatch:
@@ -66,7 +66,10 @@ jobs:
           sed '/^$/d' urls.txt > tmp.txt
           mv tmp.txt urls.txt
 
-      - name: Create Ultra Extractor
+          echo "URLS:"
+          cat urls.txt
+
+      - name: Create Extractor
         run: |
 
           cat > extractor.py << 'PY'
@@ -80,24 +83,61 @@ jobs:
 
           media = set()
 
-          def valid(u):
+          def clean(u):
 
-              u = u.lower()
+              if not u:
+                  return None
 
-              exts = [
+              u = u.strip()
+
+              bad_parts = [
+                  "&quot;",
+                  "&lt;",
+                  "&gt;",
+                  "<",
+                  ">",
+                  "thumbnail__container",
+                  "javascript:"
+              ]
+
+              for b in bad_parts:
+                  if b in u:
+                      return None
+
+              low = u.lower()
+
+              if "preview" in low:
+                  return None
+
+              if any(x in low for x in [
+                  ".jpg",
+                  ".jpeg",
+                  ".png",
+                  ".gif",
+                  ".webp",
+                  ".svg"
+              ]):
+                  return None
+
+              if not low.startswith(("http://", "https://")):
+                  return None
+
+              allowed = [
                   ".m3u8",
                   ".mp4",
                   ".mpd"
               ]
 
-              return any(x in u for x in exts)
+              if not any(x in low for x in allowed):
+                  return None
+
+              return u
 
           with sync_playwright() as p:
 
               browser = p.chromium.launch(
                   headless=True,
                   args=[
-                      "--disable-blink-features=AutomationControlled",
                       "--no-sandbox",
                       "--disable-dev-shm-usage"
                   ]
@@ -113,17 +153,13 @@ jobs:
 
               page = context.new_page()
 
-              page.set_extra_http_headers({
-                  "Accept-Language": "en-US,en;q=0.9",
-                  "Referer": "https://www.google.com/"
-              })
-
               def capture_response(response):
 
                   try:
-                      u = response.url
 
-                      if valid(u):
+                      u = clean(response.url)
+
+                      if u:
                           media.add(u)
 
                   except:
@@ -132,9 +168,10 @@ jobs:
               def capture_request(request):
 
                   try:
-                      u = request.url
 
-                      if valid(u):
+                      u = clean(request.url)
+
+                      if u:
                           media.add(u)
 
                   except:
@@ -151,14 +188,14 @@ jobs:
                       timeout=120000
                   )
 
-                  page.wait_for_timeout(15000)
+                  page.wait_for_timeout(10000)
 
                   html = page.content()
 
                   patterns = [
-                      r'https:[^"]+\.m3u8[^"]*',
-                      r'https:[^"]+\.mp4[^"]*',
-                      r'https:[^"]+\.mpd[^"]*'
+                      r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*',
+                      r'https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*',
+                      r'https?://[^\s"\'<>]+\.mpd[^\s"\'<>]*'
                   ]
 
                   for ptn in patterns:
@@ -166,32 +203,34 @@ jobs:
                       matches = re.findall(ptn, html)
 
                       for m in matches:
-                          media.add(m)
 
-                  try:
-                      page.click("button")
-                      page.wait_for_timeout(5000)
-                  except:
-                      pass
+                          u = clean(m)
+
+                          if u:
+                              media.add(u)
 
               except Exception as e:
-                  print(e)
+
+                  print(f"ERROR: {e}")
 
               browser.close()
 
-          print(json.dumps(list(media)))
+          print(json.dumps(sorted(media)))
           PY
 
       - name: Download Videos
         run: |
 
+          set +e
+
           mkdir -p downloads
 
-          while read URL
+          while IFS= read -r URL
           do
 
             [ -z "$URL" ] && continue
 
+            echo ""
             echo "=================================="
             echo "PROCESSING"
             echo "$URL"
@@ -205,59 +244,89 @@ jobs:
 
             python3 extractor.py "$URL" > "$DIR/media.json"
 
+            echo ""
             echo "FOUND MEDIA:"
             cat "$DIR/media.json"
 
-            cat "$DIR/media.json" | jq -r '.[]' > "$DIR/media.txt"
+            echo ""
 
-            while read STREAM
+            jq -r '.[]' "$DIR/media.json" > "$DIR/media.txt"
+
+            SUCCESS=0
+
+            while IFS= read -r STREAM
             do
 
               [ -z "$STREAM" ] && continue
 
               echo ""
-              echo "TRYING:"
+              echo "TRYING STREAM:"
               echo "$STREAM"
               echo ""
 
               yt-dlp \
                 --ignore-errors \
-                --retries 30 \
-                --fragment-retries 30 \
-                --concurrent-fragments 16 \
-                --no-check-certificates \
-                --geo-bypass \
+                --retries 15 \
+                --fragment-retries 15 \
+                --concurrent-fragments 8 \
                 --merge-output-format mp4 \
                 --downloader aria2c \
-                --downloader-args "aria2c:-x 16 -s 16 -k 1M" \
+                --downloader-args "aria2c:-x 8 -s 8 -k 1M" \
                 -S "res,fps,br" \
-                -f "bestvideo[height=1080]+bestaudio/bestvideo[height>=1080]+bestaudio/best" \
+                -f "bestvideo+bestaudio/best" \
                 -o "$DIR/%(title)s.%(ext)s" \
                 "$STREAM"
 
-              FILE=$(find "$DIR" -name "*.mp4" | head -n1)
+              FILE=$(find "$DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.webm" \) | head -n1)
 
               if [ ! -z "$FILE" ]; then
 
-                echo ""
-                echo "SUCCESS"
-                echo "$FILE"
-                echo ""
+                SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
 
-                break
+                echo "DOWNLOADED FILE:"
+                echo "$FILE"
+
+                echo "SIZE:"
+                echo "$SIZE"
+
+                if [ "$SIZE" -lt 1048576 ]; then
+
+                  echo "FILE TOO SMALL -> REMOVED"
+
+                  rm -f "$FILE"
+
+                else
+
+                  echo ""
+                  echo "DOWNLOAD SUCCESS"
+                  echo ""
+
+                  SUCCESS=1
+
+                  break
+
+                fi
 
               fi
 
             done < "$DIR/media.txt"
 
+            if [ "$SUCCESS" -eq 0 ]; then
+
+              echo ""
+              echo "NO VALID FILE DOWNLOADED"
+              echo ""
+
+            fi
+
             echo ""
             echo "FINAL FILES:"
-            find "$DIR"
+            find "$DIR" -type f | sort
 
           done < urls.txt
 
       - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
-          name: ultra-downloads
+          name: stable-downloads
           path: downloads
