@@ -1,4 +1,4 @@
-name: V10 Stable Downloader
+name: V11 Ultra Stable Downloader
 
 on:
   workflow_dispatch:
@@ -63,10 +63,10 @@ jobs:
           ${{ github.event.inputs.url5 }}
           EOF
 
-          sed '/^$/d' urls.txt > tmp.txt
-          mv tmp.txt urls.txt
+          sed '/^$/d' urls.txt > cleaned.txt
+          mv cleaned.txt urls.txt
 
-          echo "URLS:"
+          echo "========== URLS =========="
           cat urls.txt
 
       - name: Create Extractor
@@ -97,7 +97,8 @@ jobs:
                   "<",
                   ">",
                   "thumbnail__container",
-                  "javascript:"
+                  "javascript:",
+                  "blob:"
               ]
 
               for b in bad_parts:
@@ -106,22 +107,51 @@ jobs:
 
               low = u.lower()
 
+              # reject previews
               if "preview" in low:
                   return None
 
-              if any(x in low for x in [
+              # reject analytics / tracking
+              tracking = [
+                  "googleads",
+                  "doubleclick",
+                  "ads",
+                  "tracker",
+                  "analytics",
+                  "pixel",
+                  "deep_pixel"
+              ]
+
+              for t in tracking:
+                  if t in low:
+                      return None
+
+              # reject images
+              image_ext = [
                   ".jpg",
                   ".jpeg",
                   ".png",
                   ".gif",
                   ".webp",
                   ".svg"
-              ]):
+              ]
+
+              if any(x in low for x in image_ext):
                   return None
 
+              # must be valid http
               if not low.startswith(("http://", "https://")):
                   return None
 
+              # reject malformed combo urls
+              if ",.mp4" in low:
+                  return None
+
+              # reject broken repeated extensions
+              if low.count(".mp4") > 1:
+                  return None
+
+              # allowed video formats
               allowed = [
                   ".m3u8",
                   ".mp4",
@@ -188,7 +218,7 @@ jobs:
                       timeout=120000
                   )
 
-                  page.wait_for_timeout(10000)
+                  page.wait_for_timeout(12000)
 
                   html = page.content()
 
@@ -245,12 +275,24 @@ jobs:
             python3 extractor.py "$URL" > "$DIR/media.json"
 
             echo ""
-            echo "FOUND MEDIA:"
+            echo "========== FOUND MEDIA =========="
             cat "$DIR/media.json"
 
-            echo ""
-
             jq -r '.[]' "$DIR/media.json" > "$DIR/media.txt"
+
+            grep -Ei '^https?://' "$DIR/media.txt" | \
+            grep -v ',.mp4' | \
+            grep -v '&amp;' | \
+            grep -v 'deep_pixel' | \
+            grep -v 'analytics' | \
+            grep -v 'tracker' | \
+            sort -u > "$DIR/filtered.txt"
+
+            mv "$DIR/filtered.txt" "$DIR/media.txt"
+
+            echo ""
+            echo "========== FILTERED MEDIA =========="
+            cat "$DIR/media.txt"
 
             SUCCESS=0
 
@@ -260,21 +302,23 @@ jobs:
               [ -z "$STREAM" ] && continue
 
               echo ""
-              echo "TRYING STREAM:"
+              echo "=================================="
+              echo "TRYING STREAM"
               echo "$STREAM"
-              echo ""
+              echo "=================================="
 
               yt-dlp \
                 --ignore-errors \
-                --retries 15 \
-                --fragment-retries 15 \
+                --retries 20 \
+                --fragment-retries 20 \
                 --concurrent-fragments 8 \
                 --merge-output-format mp4 \
+                --remux-video mp4 \
                 --downloader aria2c \
                 --downloader-args "aria2c:-x 8 -s 8 -k 1M" \
                 -S "res,fps,br" \
                 -f "bestvideo+bestaudio/best" \
-                -o "$DIR/%(title)s.%(ext)s" \
+                -o "$DIR/video.%(ext)s" \
                 "$STREAM"
 
               FILE=$(find "$DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.webm" \) | head -n1)
@@ -283,14 +327,17 @@ jobs:
 
                 SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
 
-                echo "DOWNLOADED FILE:"
+                echo ""
+                echo "FOUND FILE:"
                 echo "$FILE"
 
-                echo "SIZE:"
+                echo ""
+                echo "FILE SIZE:"
                 echo "$SIZE"
 
                 if [ "$SIZE" -lt 1048576 ]; then
 
+                  echo ""
                   echo "FILE TOO SMALL -> REMOVED"
 
                   rm -f "$FILE"
@@ -299,13 +346,17 @@ jobs:
 
                   echo ""
                   echo "DOWNLOAD SUCCESS"
-                  echo ""
 
                   SUCCESS=1
 
                   break
 
                 fi
+
+              else
+
+                echo ""
+                echo "NO VIDEO FILE CREATED"
 
               fi
 
@@ -314,13 +365,12 @@ jobs:
             if [ "$SUCCESS" -eq 0 ]; then
 
               echo ""
-              echo "NO VALID FILE DOWNLOADED"
-              echo ""
+              echo "NO VALID VIDEO DOWNLOADED"
 
             fi
 
             echo ""
-            echo "FINAL FILES:"
+            echo "========== FINAL FILES =========="
             find "$DIR" -type f | sort
 
           done < urls.txt
@@ -328,5 +378,5 @@ jobs:
       - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
-          name: stable-downloads
+          name: ultra-stable-downloads
           path: downloads
