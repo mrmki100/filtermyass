@@ -1,8 +1,0 @@
-General
-Complete name                            : downloads/2026-05-12_22-23-48_17885/video.mp4
-Format                                   : HLS
-Format profile                           : Master
-File size                                : 970 Bytes
-FileExtension_Invalid                    : m3u8
-
-
