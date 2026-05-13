@@ -1,4 +1,4 @@
-name: Universal Video Downloader V14
+name: Universal Video Downloader V15
 
 on:
   workflow_dispatch:
@@ -6,21 +6,68 @@ on:
       url:
         description: "Video/Page URL"
         required: true
+        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: universal-video-downloader
+  cancel-in-progress: false
+
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
+
+    env:
+      PYTHONUNBUFFERED: 1
 
     steps:
-      - name: Checkout repository
+
+      ####################################################################
+      # LIGHTWEIGHT CHECKOUT
+      ####################################################################
+
+      - name: Checkout repository (minimal)
         uses: actions/checkout@v4
         with:
+          fetch-depth: 1
           persist-credentials: true
-          fetch-depth: 0
+          sparse-checkout: |
+            downloads
+
+      ####################################################################
+      # CACHE
+      ####################################################################
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-v15
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Cache yt-dlp
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/yt-dlp
+          key: ${{ runner.os }}-ytdlp-v15
+          restore-keys: |
+            ${{ runner.os }}-ytdlp-
+
+      - name: Cache ffmpeg temp
+        uses: actions/cache@v4
+        with:
+          path: temp
+          key: ${{ runner.os }}-ffmpeg-temp-v15
+          restore-keys: |
+            ${{ runner.os }}-ffmpeg-temp-
+
+      ####################################################################
+      # SYSTEM DEPENDENCIES
+      ####################################################################
 
       - name: Install dependencies
         run: |
@@ -28,10 +75,11 @@ jobs:
 
           sudo apt install -y \
             ffmpeg \
-            aria2 \
             jq \
             curl \
             wget \
+            aria2 \
+            mediainfo \
             python3 \
             python3-pip
 
@@ -41,12 +89,23 @@ jobs:
             beautifulsoup4 \
             lxml
 
-      - name: Prepare folders
+      ####################################################################
+      # PREPARE
+      ####################################################################
+
+      - name: Prepare workspace
         run: |
           mkdir -p downloads
           mkdir -p temp
 
-      - name: Create extractor
+          git config --global core.compression 9
+          git config --global gc.auto 0
+
+      ####################################################################
+      # CREATE ADVANCED EXTRACTOR
+      ####################################################################
+
+      - name: Create advanced extractor
         run: |
           cat > extractor.py << 'PY'
           import re
@@ -54,115 +113,161 @@ jobs:
           import requests
           import sys
           from bs4 import BeautifulSoup
+          from urllib.parse import urljoin, urlparse
 
-          url = sys.argv[1]
+          TARGET = sys.argv[1]
 
-          headers = {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537.36",
-              "Accept-Language": "en-US,en;q=0.9",
-              "Referer": url,
-          }
+          parsed = urlparse(TARGET)
 
-          bad = [
+          DOMAIN = f"{parsed.scheme}://{parsed.netloc}"
+
+          USER_AGENTS = [
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537.36",
+              "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/137.0 Safari/537.36",
+              "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile Safari/604.1"
+          ]
+
+          BAD_WORDS = [
               "ads",
               "doubleclick",
               "tracker",
-              "traffic",
               "stats",
-              "banner",
+              "analytics",
               "promo",
+              "banner",
+              "thumbnail",
+              "preview",
               "sprite",
               ".jpg",
+              ".jpeg",
               ".png",
-              ".webp",
               ".gif",
+              ".webp",
+              ".svg",
               ".css",
               ".js",
-              "logo",
-              "thumbnail",
-              "preview"
+              ".woff",
+              ".ttf",
+              ".ico"
           ]
 
-          try:
-              r = requests.get(
-                  url,
-                  headers=headers,
-                  timeout=30
-              )
+          PATTERNS = [
+              r'https://[^"\']+\.m3u8[^"\']*',
+              r'https://[^"\']+\.mp4[^"\']*',
+              r'https://[^"\']+\.webm[^"\']*',
+              r'https://[^"\']+\.mkv[^"\']*',
+              r'https://[^"\']+master\.m3u8[^"\']*',
+              r'https://[^"\']+index\.m3u8[^"\']*',
+              r'https://[^"\']+playlist[^"\']*\.m3u8[^"\']*',
+          ]
 
-              html = r.text
+          HEADERS_LIST = []
 
-              soup = BeautifulSoup(html, "lxml")
+          for ua in USER_AGENTS:
+              HEADERS_LIST.append({
+                  "User-Agent": ua,
+                  "Referer": TARGET,
+                  "Origin": DOMAIN,
+                  "Accept": "*/*",
+                  "Accept-Language": "en-US,en;q=0.9",
+                  "Connection": "keep-alive",
+              })
 
-              found = set()
+          found = set()
 
-              patterns = [
-                  r'https://[^"\']+\.m3u8[^"\']*',
-                  r'https://[^"\']+\.mp4[^"\']*',
-                  r'https://[^"\']+\.webm[^"\']*',
-              ]
+          def valid(url):
+              if not url:
+                  return False
 
-              for p in patterns:
-                  matches = re.findall(p, html)
+              low = url.lower()
 
-                  for m in matches:
+              if any(x in low for x in BAD_WORDS):
+                  return False
 
-                      m = m.strip()
+              if len(url) < 12:
+                  return False
 
-                      if any(x in m.lower() for x in bad):
-                          continue
+              if " " in url:
+                  return False
 
-                      if len(m) < 15:
-                          continue
+              if "<" in url or ">" in url:
+                  return False
 
-                      if " " in m:
-                          continue
+              return True
 
-                      found.add(m)
+          for headers in HEADERS_LIST:
 
-              for tag in soup.find_all(["video", "source", "a"]):
+              try:
 
-                  for attr in ["src", "href", "data-src"]:
+                  r = requests.get(
+                      TARGET,
+                      headers=headers,
+                      timeout=30,
+                      allow_redirects=True
+                  )
 
-                      v = tag.get(attr)
+                  html = r.text
 
-                      if not v:
-                          continue
+                  soup = BeautifulSoup(html, "lxml")
 
-                      if any(x in v.lower() for x in bad):
-                          continue
+                  for pattern in PATTERNS:
 
-                      if any(x in v.lower() for x in [".m3u8", ".mp4", ".webm"]):
+                      matches = re.findall(pattern, html)
 
-                          if v.startswith("//"):
-                              v = "https:" + v
+                      for m in matches:
 
-                          elif v.startswith("/"):
-                              base = url.split("/")[0] + "//" + url.split("/")[2]
-                              v = base + v
+                          if valid(m):
+                              found.add(m)
 
-                          found.add(v)
+                  for tag in soup.find_all([
+                      "video",
+                      "source",
+                      "a"
+                  ]):
 
-              clean = []
+                      for attr in [
+                          "src",
+                          "href",
+                          "data-src",
+                          "data-video",
+                          "data-hls",
+                          "data-url"
+                      ]:
 
-              for x in found:
+                          val = tag.get(attr)
 
-                  if not x.startswith("http"):
-                      continue
+                          if not val:
+                              continue
 
-                  if "<" in x or ">" in x:
-                      continue
+                          val = urljoin(TARGET, val)
 
-                  if ".html" in x:
-                      continue
+                          if valid(val):
 
-                  clean.append(x)
+                              if any(x in val.lower() for x in [
+                                  ".mp4",
+                                  ".m3u8",
+                                  ".webm",
+                                  ".mkv"
+                              ]):
 
-              print(json.dumps(list(set(clean))))
+                                  found.add(val)
 
-          except Exception:
-              print("[]")
+              except Exception:
+                  pass
+
+          clean = []
+
+          for item in found:
+
+              if item not in clean:
+                  clean.append(item)
+
+          print(json.dumps(clean, indent=2))
           PY
+
+      ####################################################################
+      # DOWNLOAD
+      ####################################################################
 
       - name: Download video
         env:
@@ -170,28 +275,39 @@ jobs:
         run: |
           set +e
 
-          mkdir -p downloads
-
-          echo "===================================="
-          echo "Target URL:"
+          echo "=================================================="
+          echo "TARGET URL"
+          echo "=================================================="
           echo "$URL"
-          echo "===================================="
+
+          DOMAIN=$(echo "$URL" | awk -F/ '{print $1"//"$3}')
+
+          echo "=================================================="
+          echo "DOMAIN"
+          echo "=================================================="
+          echo "$DOMAIN"
 
           cd downloads
 
-          echo "===================================="
-          echo "Trying yt-dlp direct extraction..."
-          echo "===================================="
+          ##################################################################
+          # ATTEMPT 1
+          ##################################################################
+
+          echo "=================================================="
+          echo "ATTEMPT 1 - STANDARD YT-DLP"
+          echo "=================================================="
 
           yt-dlp \
             --ignore-errors \
             --no-playlist \
-            --retries 25 \
-            --fragment-retries 25 \
-            --concurrent-fragments 8 \
-            --socket-timeout 30 \
-            --extractor-retries 10 \
+            --continue \
+            --retries 50 \
+            --fragment-retries 50 \
+            --extractor-retries 20 \
+            --file-access-retries 20 \
             --retry-sleep 5 \
+            --socket-timeout 60 \
+            --concurrent-fragments 8 \
             --downloader ffmpeg \
             --hls-use-mpegts \
             --merge-output-format mp4 \
@@ -200,106 +316,200 @@ jobs:
             --no-check-certificates \
             --restrict-filenames \
             --no-call-home \
-            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537
-            --referer "https://www.pornhub.com/" \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537.36" \
+            --referer "$URL" \
+            --add-header "Origin:$DOMAIN" \
+            --add-header "Accept:*/*" \
             --add-header "Accept-Language:en-US,en;q=0.9" \
-            --add-header "Origin:https://www.pornhub.com" \
+            --add-header "Connection:keep-alive" \
+            --add-header "DNT:1" \
             --add-header "Sec-Fetch-Dest:empty" \
             --add-header "Sec-Fetch-Mode:cors" \
-            --add-header
-                        --add-header "Sec-Fetch-Site:same-origin" \
+            --add-header "Sec-Fetch-Site:same-origin" \
             -o "video.%(ext)s" \
             "$URL"
 
-          STATUS=$?
+          ##################################################################
+          # CHECK FILES
+          ##################################################################
 
-          echo "===================================="
-          echo "Checking downloaded files..."
-          echo "===================================="
+          echo "=================================================="
+          echo "CHECKING FILES"
+          echo "=================================================="
 
-          ls -lah
-
-          FOUND=$(find . -type f \( \
+          COUNT=$(find . -type f \( \
             -iname "*.mp4" -o \
             -iname "*.mkv" -o \
             -iname "*.webm" -o \
             -iname "*.mov" \
           \) | wc -l)
 
-          echo "FOUND FILES: $FOUND"
+          echo "FOUND FILES: $COUNT"
 
-          if [ "$FOUND" -eq "0" ]; then
+          ##################################################################
+          # FALLBACK EXTRACTOR
+          ##################################################################
 
-            echo "===================================="
-            echo "yt-dlp failed, trying manual extractor..."
-            echo "===================================="
+          if [ "$COUNT" -eq "0" ]; then
+
+            echo "=================================================="
+            echo "ATTEMPT 2 - CUSTOM EXTRACTOR"
+            echo "=================================================="
 
             cd ..
 
             python3 extractor.py "$URL" > links.json
 
-            echo "FOUND MEDIA:"
+            echo "=================================================="
+            echo "FOUND MEDIA LINKS"
+            echo "=================================================="
+
             cat links.json
 
-            FIRST=$(jq -r '.[0]' links.json)
+            TOTAL=$(jq length links.json)
 
-            if [ "$FIRST" != "null" ] && [ ! -z "$FIRST" ]; then
+            echo "TOTAL LINKS: $TOTAL"
 
-              echo "===================================="
-              echo "Trying extracted link:"
-              echo "$FIRST"
-              echo "===================================="
+            if [ "$TOTAL" -gt "0" ]; then
 
-              cd downloads
+              INDEX=0
 
-              yt-dlp \
-                --ignore-errors \
-                --retries 20 \
-                --fragment-retries 20 \
-                --downloader ffmpeg \
-                --hls-use-mpegts \
-                --merge-output-format mp4 \
-                --referer "$URL" \
-                --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537.36" \
-                -o "video_fallback.%(ext)s" \
-                "$FIRST"
+              while [ $INDEX -lt $TOTAL ]; do
 
-              if [ ! -f video_fallback.mp4 ]; then
+                LINK=$(jq -r ".[$INDEX]" links.json)
 
-                echo "===================================="
-                echo "Trying ffmpeg direct..."
-                echo "===================================="
+                echo "=================================================="
+                echo "TRYING LINK $INDEX"
+                echo "$LINK"
+                echo "=================================================="
+
+                cd downloads
+
+                yt-dlp \
+                  --ignore-errors \
+                  --continue \
+                  --retries 20 \
+                  --fragment-retries 20 \
+                  --downloader ffmpeg \
+                  --hls-use-mpegts \
+                  --merge-output-format mp4 \
+                  --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537.36" \
+                  --referer "$URL" \
+                  --add-header "Origin:$DOMAIN" \
+                  -o "fallback_${INDEX}.%(ext)s" \
+                  "$LINK"
+
+                CHECK=$(find . -type f \( \
+                  -iname "*.mp4" -o \
+                  -iname "*.mkv" -o \
+                  -iname "*.webm" \
+                \) | wc -l)
+
+                if [ "$CHECK" -gt "0" ]; then
+                  echo "SUCCESS"
+                  break
+                fi
+
+                echo "=================================================="
+                echo "TRYING FFMPEG DIRECT"
+                echo "=================================================="
 
                 ffmpeg \
-                  -headers "Referer: $URL\r\nUser-Agent: Mozilla/5.0\r\n" \
-                  -i "$FIRST" \
+                  -loglevel error \
+                  -headers "Referer: $URL\r\nOrigin: $DOMAIN\r\nUser-Agent: Mozilla/5.0\r\n" \
+                  -i "$LINK" \
                   -c copy \
-                  fallback_video.mp4
-              fi
+                  "ffmpeg_${INDEX}.mp4"
+
+                CHECK2=$(find . -type f \( \
+                  -iname "*.mp4" -o \
+                  -iname "*.mkv" -o \
+                  -iname "*.webm" \
+                \) | wc -l)
+
+                if [ "$CHECK2" -gt "0" ]; then
+                  echo "FFMPEG SUCCESS"
+                  break
+                fi
+
+                cd ..
+
+                INDEX=$((INDEX+1))
+
+              done
+
             fi
+
           fi
 
-          echo "===================================="
-          echo "Final files:"
-          echo "===================================="
+          ##################################################################
+          # FINAL CHECK
+          ##################################################################
+
+          echo "=================================================="
+          echo "FINAL RESULT"
+          echo "=================================================="
 
           find downloads -type f || true
+
+          FINAL=$(find downloads -type f \( \
+            -iname "*.mp4" -o \
+            -iname "*.mkv" -o \
+            -iname "*.webm" -o \
+            -iname "*.mov" \
+          \) | wc -l)
+
+          echo "FINAL VIDEO COUNT: $FINAL"
+
+          if [ "$FINAL" -eq "0" ]; then
+            echo "NO VIDEO DOWNLOADED"
+            exit 1
+          fi
+
+      ####################################################################
+      # SHOW INFO
+      ####################################################################
+
+      - name: Media info
+        run: |
+          echo "=================================================="
+          echo "MEDIA INFORMATION"
+          echo "=================================================="
+
+          find downloads -type f | while read FILE; do
+            echo "--------------------------------------"
+            echo "$FILE"
+            echo "--------------------------------------"
+
+            mediainfo "$FILE" || true
+
+            echo
+          done
+
+      ####################################################################
+      # GIT COMMIT
+      ####################################################################
 
       - name: Commit downloaded videos
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add downloads || true
+          git add downloads/* || true
 
-          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git diff --cached --quiet && echo "NO CHANGES" && exit 0
 
           git commit -m "Add downloaded video"
 
           git push
+
+      ####################################################################
+      # ARTIFACT BACKUP
+      ####################################################################
 
       - name: Upload artifact backup
         uses: actions/upload-artifact@v4
         with:
           name: downloaded-video
           path: downloads/
+          retention-days: 7
