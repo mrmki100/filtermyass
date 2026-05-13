@@ -1,4 +1,4 @@
-name: Video Downloader
+name: Video Downloader V4 Fixed
 
 on:
   workflow_dispatch:
@@ -33,7 +33,6 @@ jobs:
 
     - name: Install tools
       run: |
-
         python3 -m pip install --upgrade pip
         pip install yt-dlp playwright
 
@@ -44,7 +43,6 @@ jobs:
 
     - name: Prepare URLs
       run: |
-
         cat > urls.txt <<EOF
         ${{ github.event.inputs.url1 }}
         ${{ github.event.inputs.url2 }}
@@ -57,64 +55,99 @@ jobs:
 
     - name: Create network interceptor
       run: |
-
         cat > intercept.py << 'PY'
         import sys
         import json
         from playwright.sync_api import sync_playwright
 
-        url=sys.argv[1]
-        media=[]
+        url = sys.argv[1]
+        media = []
 
         def valid(u):
-            good=[".mp4",".m3u8",".mpd","videoplayback","manifest"]
-            bad=[".jpg",".png",".gif",".css",".js",".svg"]
+            good = [
+                ".mp4",
+                ".m3u8",
+                ".mpd",
+                "videoplayback",
+                "manifest",
+                "playlist"
+            ]
+
+            bad = [
+                ".jpg",
+                ".png",
+                ".gif",
+                ".css",
+                ".js",
+                ".svg",
+                "banner",
+                "ads",
+                "doubleclick"
+            ]
+
+            ul = u.lower()
 
             for b in bad:
-                if b in u.lower():
+                if b in ul:
                     return False
 
             for g in good:
-                if g in u.lower():
+                if g in ul:
                     return True
 
             return False
 
         with sync_playwright() as p:
 
-            browser=p.chromium.launch(headless=True)
-            page=browser.new_page()
+            browser = p.chromium.launch(headless=True)
+
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
+            )
+
+            page = context.new_page()
 
             def resp(r):
                 try:
-                    u=r.url
-                    ct=r.headers.get("content-type","")
+                    u = r.url
+                    ct = r.headers.get("content-type", "")
 
                     if valid(u) or "video" in ct or "mpegurl" in ct:
                         media.append({
-                            "url":u,
-                            "type":ct
+                            "url": u,
+                            "type": ct
                         })
+
                 except:
                     pass
 
-            page.on("response",resp)
+            page.on("response", resp)
 
-            page.goto(url,timeout=90000,wait_until="networkidle")
+            page.goto(
+                url,
+                timeout=120000,
+                wait_until="domcontentloaded"
+            )
 
             try:
-                page.locator("video").click(timeout=5000)
+                page.mouse.click(640, 360)
             except:
                 pass
 
-            page.wait_for_timeout(15000)
+            try:
+                page.locator("video").click(timeout=10000)
+            except:
+                pass
+
+            page.wait_for_timeout(60000)
 
             browser.close()
 
-        uniq=[]
-        seen=set()
+        uniq = []
+        seen = set()
 
         for m in media:
+
             if m["url"] not in seen:
                 seen.add(m["url"])
                 uniq.append(m)
@@ -135,25 +168,33 @@ jobs:
 
           TS=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
           DIR="downloads/$TS"
+
           mkdir -p "$DIR"
 
           ################################
-          # STEP 1 yt-dlp
+          # STEP 1 DIRECT YT-DLP
           ################################
 
           echo "STEP1 yt-dlp"
 
           yt-dlp \
             --no-playlist \
+            --user-agent "Mozilla/5.0" \
+            --referer "$URL" \
+            --add-header "Referer:$URL" \
+            --add-header "User-Agent:Mozilla/5.0" \
+            --retries 20 \
+            --fragment-retries 20 \
+            --retry-sleep 5 \
+            --concurrent-fragments 8 \
+            --hls-use-mpegts \
+            --downloader ffmpeg \
             -f "bestvideo+bestaudio/best" \
             --merge-output-format mp4 \
-            --retries 10 \
-            --fragment-retries 10 \
-            --concurrent-fragments 4 \
             -o "$DIR/%(title).120s_%(id)s.%(ext)s" \
             "$URL" || true
 
-          FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
+          FILE=$(find "$DIR" -type f -iname "*.mp4" | sort | tail -n1 || true)
 
           SIZE=0
 
@@ -165,7 +206,7 @@ jobs:
           # HARD MODE
           ################################
 
-          if [ -z "$FILE" ] || [ $SIZE -lt 1000000 ]; then
+          if [ -z "$FILE" ] || [ $SIZE -lt 5000000 ]; then
 
             echo "START HARD MODE"
 
@@ -182,14 +223,17 @@ jobs:
 
             cat "$DIR/media.json" \
             | jq -r '.[].url' \
-            | grep -vE 'adtng|doubleclick|jerkmate|amateur\.tv|creative|banner|ads' \
+            | grep -viE 'adtng|doubleclick|jerkmate|creative|banner|ads|preview|sprite|thumb' \
+            | sort -u \
             > "$DIR/all.txt"
 
             ################################
             # TRY M3U8 FIRST
             ################################
 
-            grep '\.m3u8' "$DIR/all.txt" > "$DIR/m3u8.txt" || true
+            grep -i '\.m3u8' "$DIR/all.txt" \
+            | grep -viE '360|240|144|low|preview' \
+            > "$DIR/m3u8.txt" || true
 
             SUCCESS=0
 
@@ -204,6 +248,13 @@ jobs:
 
               yt-dlp \
                 --referer "$URL" \
+                --add-header "Referer:$URL" \
+                --add-header "User-Agent:Mozilla/5.0" \
+                --hls-use-mpegts \
+                --downloader ffmpeg \
+                --retries 20 \
+                --fragment-retries 20 \
+                --retry-sleep 5 \
                 -f best \
                 --merge-output-format mp4 \
                 -o "$DIR/stream.%(ext)s" \
@@ -217,7 +268,9 @@ jobs:
 
             if [ $SUCCESS -eq 0 ]; then
 
-              grep '\.mp4' "$DIR/all.txt" > "$DIR/mp4.txt" || true
+              grep -i '\.mp4' "$DIR/all.txt" \
+              | grep -viE 'preview|sample|thumb' \
+              > "$DIR/mp4.txt" || true
 
               while read M
               do
@@ -229,6 +282,9 @@ jobs:
                 echo "TRY MP4 $M"
 
                 wget \
+                  --tries=20 \
+                  --retry-connrefused \
+                  --waitretry=5 \
                   --referer="$URL" \
                   --user-agent="Mozilla/5.0" \
                   -O "$DIR/video.mp4" \
@@ -244,7 +300,7 @@ jobs:
           # VALIDATE FILE
           ################################
 
-          FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
+          FILE=$(find "$DIR" -type f -iname "*.mp4" | sort | tail -n1 || true)
 
           if [ ! -z "$FILE" ]; then
 
@@ -252,17 +308,21 @@ jobs:
 
             echo "SIZE $SIZE"
 
-            if [ $SIZE -lt 1000000 ]; then
-              echo "FAIL tiny"
+            if [ $SIZE -lt 5000000 ]; then
+
+              echo "FAIL tiny file"
+
               rm -f "$FILE"
+
             fi
+
           fi
 
           ################################
           # SPLIT BIG FILE
           ################################
 
-          FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
+          FILE=$(find "$DIR" -type f -iname "*.mp4" | sort | tail -n1 || true)
 
           if [ ! -z "$FILE" ]; then
 
@@ -270,14 +330,17 @@ jobs:
 
             if [ $SIZE -gt 95000000 ]; then
 
-              echo "SPLIT"
+              echo "SPLIT BIG FILE"
 
               7z a -v90m "$DIR/video.7z" "$FILE"
 
               rm "$FILE"
 
             fi
+
           fi
+
+          echo "DONE $URL"
 
           ) &
 
@@ -285,7 +348,7 @@ jobs:
 
         wait
 
-    - name: Commit
+    - name: Commit downloads
       run: |
 
         git config user.name github-actions
@@ -293,6 +356,6 @@ jobs:
 
         git add downloads
 
-        git commit -m "videos downloaded" || echo nothing
+        git commit -m "videos downloaded" || echo "nothing to commit"
 
         git push
