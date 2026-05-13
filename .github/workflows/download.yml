@@ -220,13 +220,3 @@ jobs:
 	 echo "done < urls.txt"
 	 echo "wait"
 	 echo "All processes completed successfully"
-Mathematical Context for Quality Selection
-In the quality generation logic, when parsing resolutions like 720p, the height extraction uses the formula:
-\text{height} = \text{quality_string} \times \mathbb{1}_{{\text{endsWit
-Where the operation ${QUALITY%p} removes the 'p' suffix, converting 720p→ 720. The quality selection in yt-dlp follows:
- 
-
-\text{format_selection} = \begin{cases} \text{best}\[h \leq H
-& \text{if } H \text{ is numeric} \ \text{best} & \text{if quality = 'best'} \ \text{worst} & \text{if quality = 'worst'} \ \emptyset & \text{otherwise} \end{cases} ]
-Where ( h ) represents video height and ( H ) is the parsed height value.
-.
