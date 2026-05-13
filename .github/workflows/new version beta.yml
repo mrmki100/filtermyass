@@ -1,382 +1,231 @@
-name: V11 Ultra Stable Downloader
+name: Universal Video Downloader V13
 
 on:
   workflow_dispatch:
     inputs:
-      url1:
-        required: false
-        type: string
-      url2:
-        required: false
-        type: string
-      url3:
-        required: false
-        type: string
-      url4:
-        required: false
-        type: string
-      url5:
-        required: false
-        type: string
+      url:
+        description: "Video/Page URL"
+        required: true
 
 jobs:
-
   download:
-
     runs-on: ubuntu-latest
-
-    container:
-      image: mcr.microsoft.com/playwright/python:v1.59.0-noble
-
-    timeout-minutes: 360
+    timeout-minutes: 120
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/checkout@v4
-
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
+          sudo apt update
 
-          apt-get update
-
-          apt-get install -y \
+          sudo apt install -y \
             ffmpeg \
+            aria2 \
             jq \
             curl \
             wget \
-            aria2
+            python3 \
+            python3-pip
 
-          python3 -m pip install --upgrade pip
+          pip install -U yt-dlp requests
 
-          pip install yt-dlp playwright
-
-          playwright install chromium
-
-      - name: Build URL List
+      - name: Prepare folders
         run: |
+          mkdir -p downloads
+          mkdir -p temp
 
-          cat > urls.txt <<EOF
-          ${{ github.event.inputs.url1 }}
-          ${{ github.event.inputs.url2 }}
-          ${{ github.event.inputs.url3 }}
-          ${{ github.event.inputs.url4 }}
-          ${{ github.event.inputs.url5 }}
-          EOF
-
-          sed '/^$/d' urls.txt > cleaned.txt
-          mv cleaned.txt urls.txt
-
-          echo "========== URLS =========="
-          cat urls.txt
-
-      - name: Create Extractor
+      - name: Create extractor
         run: |
-
           cat > extractor.py << 'PY'
-          import sys
-          import json
           import re
-
-          from playwright.sync_api import sync_playwright
+          import json
+          import requests
+          import sys
 
           url = sys.argv[1]
 
-          media = set()
+          headers = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537.36",
+              "Accept-Language": "en-US,en;q=0.9",
+              "Referer": url,
+          }
 
-          def clean(u):
+          try:
+              r = requests.get(
+                  url,
+                  headers=headers,
+                  timeout=30
+              )
 
-              if not u:
-                  return None
+              html = r.text
 
-              u = u.strip()
-
-              bad_parts = [
-                  "&quot;",
-                  "&lt;",
-                  "&gt;",
-                  "<",
-                  ">",
-                  "thumbnail__container",
-                  "javascript:",
-                  "blob:"
+              patterns = [
+                  r'https://[^"\']+\.m3u8[^"\']*',
+                  r'https://[^"\']+\.mp4[^"\']*',
               ]
 
-              for b in bad_parts:
-                  if b in u:
-                      return None
-
-              low = u.lower()
-
-              # reject previews
-              if "preview" in low:
-                  return None
-
-              # reject analytics / tracking
-              tracking = [
-                  "googleads",
-                  "doubleclick",
+              bad = [
                   "ads",
+                  "doubleclick",
                   "tracker",
-                  "analytics",
-                  "pixel",
-                  "deep_pixel"
-              ]
-
-              for t in tracking:
-                  if t in low:
-                      return None
-
-              # reject images
-              image_ext = [
+                  "traffic",
+                  "stats",
+                  "banner",
+                  "promo",
+                  "sprite",
                   ".jpg",
-                  ".jpeg",
                   ".png",
-                  ".gif",
                   ".webp",
-                  ".svg"
+                  ".gif"
               ]
 
-              if any(x in low for x in image_ext):
-                  return None
+              found = set()
 
-              # must be valid http
-              if not low.startswith(("http://", "https://")):
-                  return None
+              for p in patterns:
+                  matches = re.findall(p, html)
 
-              # reject malformed combo urls
-              if ",.mp4" in low:
-                  return None
+                  for m in matches:
 
-              # reject broken repeated extensions
-              if low.count(".mp4") > 1:
-                  return None
+                      if any(x in m.lower() for x in bad):
+                          continue
 
-              # allowed video formats
-              allowed = [
-                  ".m3u8",
-                  ".mp4",
-                  ".mpd"
-              ]
+                      found.add(m)
 
-              if not any(x in low for x in allowed):
-                  return None
+              print(json.dumps(list(found)))
 
-              return u
-
-          with sync_playwright() as p:
-
-              browser = p.chromium.launch(
-                  headless=True,
-                  args=[
-                      "--no-sandbox",
-                      "--disable-dev-shm-usage"
-                  ]
-              )
-
-              context = browser.new_context(
-                  viewport={
-                      "width": 1366,
-                      "height": 768
-                  },
-                  user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
-              )
-
-              page = context.new_page()
-
-              def capture_response(response):
-
-                  try:
-
-                      u = clean(response.url)
-
-                      if u:
-                          media.add(u)
-
-                  except:
-                      pass
-
-              def capture_request(request):
-
-                  try:
-
-                      u = clean(request.url)
-
-                      if u:
-                          media.add(u)
-
-                  except:
-                      pass
-
-              page.on("response", capture_response)
-              page.on("request", capture_request)
-
-              try:
-
-                  page.goto(
-                      url,
-                      wait_until="networkidle",
-                      timeout=120000
-                  )
-
-                  page.wait_for_timeout(12000)
-
-                  html = page.content()
-
-                  patterns = [
-                      r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*',
-                      r'https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*',
-                      r'https?://[^\s"\'<>]+\.mpd[^\s"\'<>]*'
-                  ]
-
-                  for ptn in patterns:
-
-                      matches = re.findall(ptn, html)
-
-                      for m in matches:
-
-                          u = clean(m)
-
-                          if u:
-                              media.add(u)
-
-              except Exception as e:
-
-                  print(f"ERROR: {e}")
-
-              browser.close()
-
-          print(json.dumps(sorted(media)))
+          except Exception:
+              print("[]")
           PY
 
-      - name: Download Videos
+      - name: Download video
+        env:
+          URL: ${{ github.event.inputs.url }}
         run: |
-
           set +e
 
           mkdir -p downloads
 
-          while IFS= read -r URL
-          do
+          echo "===================================="
+          echo "Target URL:"
+          echo "$URL"
+          echo "===================================="
 
-            [ -z "$URL" ] && continue
+          cd downloads
 
-            echo ""
-            echo "=================================="
-            echo "PROCESSING"
-            echo "$URL"
-            echo "=================================="
+          echo "===================================="
+          echo "Trying yt-dlp direct extraction..."
+          echo "===================================="
 
-            ID=$(date +%s)_$RANDOM
+          yt-dlp \
+            --ignore-errors \
+            --no-playlist \
+            --retries 25 \
+            --fragment-retries 25 \
+            --concurrent-fragments 8 \
+            --socket-timeout 30 \
+            --extractor-retries 10 \
+            --retry-sleep 5 \
+            --downloader ffmpeg \
+            --hls-use-mpegts \
+            --merge-output-format mp4 \
+            --remux-video mp4 \
+            --geo-bypass \
+            --no-check-certificates \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537.36" \
+            --referer "https://www.pornhub.com/" \
+            --add-header "Accept-Language:en-US,en;q=0.9" \
+            --add-header "Origin:https://www.pornhub.com" \
+            --add-header "Sec-Fetch-Dest:empty" \
+            --add-header "Sec-Fetch-Mode:cors" \
+            --add-header "Sec-Fetch-Site:same-site" \
+            --add-header "Connection:keep-alive" \
+            --add-header "DNT:1" \
+            --downloader-args "ffmpeg:-headers Referer:https://www.pornhub.com/" \
+            -f "bestvideo+bestaudio/best" \
+            -o "video.%(ext)s" \
+            "$URL"
 
-            DIR="downloads/$ID"
+          echo "===================================="
+          echo "Checking downloaded files..."
+          echo "===================================="
 
-            mkdir -p "$DIR"
+          ls -lah || true
 
-            python3 extractor.py "$URL" > "$DIR/media.json"
+          VALID=0
 
-            echo ""
-            echo "========== FOUND MEDIA =========="
-            cat "$DIR/media.json"
+          for f in *; do
 
-            jq -r '.[]' "$DIR/media.json" > "$DIR/media.txt"
+            if [ -f "$f" ]; then
 
-            grep -Ei '^https?://' "$DIR/media.txt" | \
-            grep -v ',.mp4' | \
-            grep -v '&amp;' | \
-            grep -v 'deep_pixel' | \
-            grep -v 'analytics' | \
-            grep -v 'tracker' | \
-            sort -u > "$DIR/filtered.txt"
+              SIZE=$(stat -c%s "$f")
 
-            mv "$DIR/filtered.txt" "$DIR/media.txt"
-
-            echo ""
-            echo "========== FILTERED MEDIA =========="
-            cat "$DIR/media.txt"
-
-            SUCCESS=0
-
-            while IFS= read -r STREAM
-            do
-
-              [ -z "$STREAM" ] && continue
-
-              echo ""
-              echo "=================================="
-              echo "TRYING STREAM"
-              echo "$STREAM"
-              echo "=================================="
-
-              yt-dlp \
-                --ignore-errors \
-                --retries 20 \
-                --fragment-retries 20 \
-                --concurrent-fragments 8 \
-                --merge-output-format mp4 \
-                --remux-video mp4 \
-                --downloader aria2c \
-                --downloader-args "aria2c:-x 8 -s 8 -k 1M" \
-                -S "res,fps,br" \
-                -f "bestvideo+bestaudio/best" \
-                -o "$DIR/video.%(ext)s" \
-                "$STREAM"
-
-              FILE=$(find "$DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.webm" \) | head -n1)
-
-              if [ ! -z "$FILE" ]; then
-
-                SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
-
-                echo ""
-                echo "FOUND FILE:"
-                echo "$FILE"
-
-                echo ""
-                echo "FILE SIZE:"
-                echo "$SIZE"
-
-                if [ "$SIZE" -lt 1048576 ]; then
-
-                  echo ""
-                  echo "FILE TOO SMALL -> REMOVED"
-
-                  rm -f "$FILE"
-
-                else
-
-                  echo ""
-                  echo "DOWNLOAD SUCCESS"
-
-                  SUCCESS=1
-
-                  break
-
-                fi
-
+              echo "$f size: $SIZE"
+                            if [ "$SIZE" -gt 1000000 ]; then
+                VALID=1
               else
-
-                echo ""
-                echo "NO VIDEO FILE CREATED"
-
+                echo "Removing small file: $f"
+                rm -f "$f"
               fi
-
-            done < "$DIR/media.txt"
-
-            if [ "$SUCCESS" -eq 0 ]; then
-
-              echo ""
-              echo "NO VALID VIDEO DOWNLOADED"
 
             fi
 
-            echo ""
-            echo "========== FINAL FILES =========="
-            find "$DIR" -type f | sort
+          done
 
-          done < urls.txt
+          if [ "$VALID" -eq 0 ]; then
 
-      - name: Upload Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: ultra-stable-downloads
-          path: downloads
+            echo "===================================="
+            echo "yt-dlp did not produce a valid file"
+            echo "Trying fallback extractor..."
+            echo "===================================="
+
+            cd ..
+
+            python extractor.py "$URL" > links.json
+
+            cat links.json
+
+            COUNT=$(jq length links.json)
+
+            if [ "$COUNT" -gt 0 ]; then
+
+              echo "Found $COUNT candidate streams"
+
+              for STREAM in $(jq -r '.[]' links.json); do
+
+                echo "Trying stream:"
+                echo "$STREAM"
+
+                yt-dlp \
+                  --ignore-errors \
+                  --retries 20 \
+                  --fragment-retries 20 \
+                  --concurrent-fragments 8 \
+                  --downloader ffmpeg \
+                  --hls-use-mpegts \
+                  --merge-output-format mp4 \
+                  --remux-video mp4 \
+                  --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+                  --referer "$URL" \
+                  -o "downloads/fallback_%(id)s.%(ext)s" \
+                  "$STREAM"
+
+              done
+
+            else
+              echo "No streams found by extractor."
+            fi
+
+          fi
+
+      - name: Commit downloaded videos
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+
+          git add downloads/* || true
+
+          git commit -m "Add downloaded video" || echo "Nothing to commit"
+
+          git push
