@@ -43,10 +43,6 @@ jobs:
 
     steps:
 
-    ########################################
-    # CHECKOUT
-    ########################################
-
     - name: Checkout
       uses: actions/checkout@v4
       with:
@@ -55,31 +51,15 @@ jobs:
         persist-credentials: true
         ref: ${{ github.ref }}
 
-    ########################################
-    # FIX GIT DIRECTORY
-    ########################################
-
     - name: Fix git directory
       run: |
-
         git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
         chown -R root:root "$GITHUB_WORKSPACE" || true
-
-        git status
-
-    ########################################
-    # FIX CACHE
-    ########################################
 
     - name: Fix cache permissions
       run: |
         mkdir -p /github/home/.cache/pip
         chmod -R 777 /github/home/.cache || true
-
-    ########################################
-    # CACHE PIP
-    ########################################
 
     - name: Cache pip
       uses: actions/cache@v4
@@ -87,19 +67,11 @@ jobs:
         path: /github/home/.cache/pip
         key: pip-${{ runner.os }}
 
-    ########################################
-    # CACHE PLAYWRIGHT
-    ########################################
-
     - name: Cache Playwright
       uses: actions/cache@v4
       with:
         path: /ms-playwright
         key: playwright-${{ runner.os }}
-
-    ########################################
-    # INSTALL TOOLS
-    ########################################
 
     - name: Install tools
       run: |
@@ -120,9 +92,7 @@ jobs:
 
         pip install -U yt-dlp playwright
 
-    ########################################
-    # PREPARE URLS
-    ########################################
+        yt-dlp -U || true
 
     - name: Prepare URLs
       run: |
@@ -147,119 +117,80 @@ jobs:
         echo "========== URLS =========="
         cat urls.txt || true
 
-    ########################################
-    # CREATE INTERCEPTOR
-    ########################################
-
     - name: Create interceptor
       run: |
 
         cat > intercept.py << 'PY'
+import sys
+import json
+from playwright.sync_api import sync_playwright
 
-        import sys
-        import json
-        from playwright.sync_api import sync_playwright
+url = sys.argv[1]
+media = []
 
-        url = sys.argv[1]
+def valid(u):
+    ul = u.lower()
 
-        media = []
+    good = [
+        ".mp4",".m3u8",".mpd",".mov",".webm",".mkv",
+        "playlist","manifest","stream"
+    ]
 
-        def valid(u):
+    bad = [
+        ".jpg",".jpeg",".png",".gif",".svg",
+        ".css",".js","banner","ads","analytics","doubleclick"
+    ]
 
-            ul = u.lower()
-
-            good = [
-                ".mp4",
-                ".m3u8",
-                ".mpd",
-                ".mov",
-                ".webm",
-                ".mkv",
-                "playlist",
-                "manifest",
-                "stream"
-            ]
-
-            bad = [
-                ".jpg",
-                ".jpeg",
-                ".png",
-                ".gif",
-                ".svg",
-                ".css",
-                ".js",
-                "banner",
-                "ads",
-                "analytics",
-                "doubleclick"
-            ]
-
-            for b in bad:
-                if b in ul:
-                    return False
-
-            for g in good:
-                if g in ul:
-                    return True
-
+    for b in bad:
+        if b in ul:
             return False
 
-        with sync_playwright() as p:
+    for g in good:
+        if g in ul:
+            return True
 
-            browser = p.chromium.launch(headless=True)
+    return False
 
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
-            )
+with sync_playwright() as p:
 
-            page = context.new_page()
+    browser = p.chromium.launch(headless=True)
 
-            def handle_response(r):
+    context = browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
+    )
 
-                try:
+    page = context.new_page()
 
-                    u = r.url
-                    ct = r.headers.get("content-type", "")
+    def handle_response(r):
+        try:
+            u = r.url
+            ct = r.headers.get("content-type","")
 
-                    if valid(u) or "video" in ct or "mpegurl" in ct:
+            if valid(u) or "video" in ct or "mpegurl" in ct:
+                media.append({"url":u,"type":ct})
+        except:
+            pass
 
-                        media.append({
-                            "url": u,
-                            "type": ct
-                        })
+    page.on("response", handle_response)
 
-                except:
-                    pass
+    try:
+        page.goto(url, timeout=120000, wait_until="domcontentloaded")
+        page.wait_for_timeout(30000)
+    except:
+        pass
 
-            page.on("response", handle_response)
+    browser.close()
 
-            page.goto(
-                url,
-                timeout=120000,
-                wait_until="domcontentloaded"
-            )
+unique=[]
+seen=set()
 
-            page.wait_for_timeout(30000)
+for m in media:
+    if m["url"] not in seen:
+        seen.add(m["url"])
+        unique.append(m)
 
-            browser.close()
-
-        unique = []
-        seen = set()
-
-        for m in media:
-
-            if m["url"] not in seen:
-
-                seen.add(m["url"])
-                unique.append(m)
-
-        print(json.dumps(unique))
-
-        PY
-
-    ########################################
-    # DOWNLOAD VIDEOS
-    ########################################
+print(json.dumps(unique))
+PY
 
     - name: Download videos
       run: |
@@ -282,10 +213,6 @@ jobs:
 
           mkdir -p "$DIR"
 
-          ########################################
-          # MAIN DOWNLOAD
-          ########################################
-
           yt-dlp \
             --no-playlist \
             --ignore-errors \
@@ -298,7 +225,7 @@ jobs:
             --concurrent-fragments 2 \
             --merge-output-format mp4 \
             --restrict-filenames \
-            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36" \
+            --user-agent "Mozilla/5.0" \
             -f "bv*+ba/b" \
             -o "$DIR/%(title).120s_%(id)s.%(ext)s" \
             "$URL" || true
@@ -311,30 +238,21 @@ jobs:
             SIZE=$(stat -c%s "$FILE")
           fi
 
-          ########################################
-          # FALLBACK
-          ########################################
-
           if [ -z "$FILE" ] || [ $SIZE -lt 5000000 ]; then
 
             rm -f "$DIR"/* || true
 
-            python3 intercept.py "$URL" > "$DIR/media.json"
+            python3 intercept.py "$URL" > "$DIR/media.json" || true
 
-            cat "$DIR/media.json" \
-            | jq -r '.[].url' \
+            cat "$DIR/media.json" 2>/dev/null \
+            | jq -r '.[].url' 2>/dev/null \
             | grep -viE 'ads|banner|doubleclick|analytics|preview|thumb|sprite' \
             | sort -u \
-            > "$DIR/all.txt"
+            > "$DIR/all.txt" || true
 
             SUCCESS=0
 
-            ########################################
-            # M3U8 STREAMS
-            ########################################
-
-            grep -i '\.m3u8' "$DIR/all.txt" \
-            > "$DIR/m3u8.txt" || true
+            grep -i '\.m3u8' "$DIR/all.txt" > "$DIR/m3u8.txt" || true
 
             while read M
             do
@@ -355,10 +273,6 @@ jobs:
                 && SUCCESS=1 && break
 
             done < "$DIR/m3u8.txt"
-
-            ########################################
-            # DIRECT VIDEO LINKS
-            ########################################
 
             if [ $SUCCESS -eq 0 ]; then
 
@@ -395,10 +309,6 @@ jobs:
 
           fi
 
-          ########################################
-          # CLEANUP
-          ########################################
-
           FILE=$(find "$DIR" -type f | grep -Ei '\.mp4|\.mkv|\.webm|\.mov' | head -n1 || true)
 
           if [ ! -z "$FILE" ]; then
@@ -418,16 +328,8 @@ jobs:
 
         done < urls.txt
 
-    ########################################
-    # COMMIT
-    ########################################
-
     - name: Commit downloads
       run: |
-
-        cd "$GITHUB_WORKSPACE"
-
-        git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
         git config user.name "github-actions"
         git config user.email "github-actions@github.com"
