@@ -1,4 +1,4 @@
-name: Universal Video Downloader V13
+name: Universal Video Downloader V14
 
 on:
   workflow_dispatch:
@@ -6,6 +6,9 @@ on:
       url:
         description: "Video/Page URL"
         required: true
+
+permissions:
+  contents: write
 
 jobs:
   download:
@@ -15,6 +18,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
 
       - name: Install dependencies
         run: |
@@ -29,7 +35,11 @@ jobs:
             python3 \
             python3-pip
 
-          pip install -U yt-dlp requests
+          pip3 install -U \
+            yt-dlp \
+            requests \
+            beautifulsoup4 \
+            lxml
 
       - name: Prepare folders
         run: |
@@ -43,6 +53,7 @@ jobs:
           import json
           import requests
           import sys
+          from bs4 import BeautifulSoup
 
           url = sys.argv[1]
 
@@ -51,6 +62,26 @@ jobs:
               "Accept-Language": "en-US,en;q=0.9",
               "Referer": url,
           }
+
+          bad = [
+              "ads",
+              "doubleclick",
+              "tracker",
+              "traffic",
+              "stats",
+              "banner",
+              "promo",
+              "sprite",
+              ".jpg",
+              ".png",
+              ".webp",
+              ".gif",
+              ".css",
+              ".js",
+              "logo",
+              "thumbnail",
+              "preview"
+          ]
 
           try:
               r = requests.get(
@@ -61,39 +92,73 @@ jobs:
 
               html = r.text
 
+              soup = BeautifulSoup(html, "lxml")
+
+              found = set()
+
               patterns = [
                   r'https://[^"\']+\.m3u8[^"\']*',
                   r'https://[^"\']+\.mp4[^"\']*',
+                  r'https://[^"\']+\.webm[^"\']*',
               ]
-
-              bad = [
-                  "ads",
-                  "doubleclick",
-                  "tracker",
-                  "traffic",
-                  "stats",
-                  "banner",
-                  "promo",
-                  "sprite",
-                  ".jpg",
-                  ".png",
-                  ".webp",
-                  ".gif"
-              ]
-
-              found = set()
 
               for p in patterns:
                   matches = re.findall(p, html)
 
                   for m in matches:
 
+                      m = m.strip()
+
                       if any(x in m.lower() for x in bad):
+                          continue
+
+                      if len(m) < 15:
+                          continue
+
+                      if " " in m:
                           continue
 
                       found.add(m)
 
-              print(json.dumps(list(found)))
+              for tag in soup.find_all(["video", "source", "a"]):
+
+                  for attr in ["src", "href", "data-src"]:
+
+                      v = tag.get(attr)
+
+                      if not v:
+                          continue
+
+                      if any(x in v.lower() for x in bad):
+                          continue
+
+                      if any(x in v.lower() for x in [".m3u8", ".mp4", ".webm"]):
+
+                          if v.startswith("//"):
+                              v = "https:" + v
+
+                          elif v.startswith("/"):
+                              base = url.split("/")[0] + "//" + url.split("/")[2]
+                              v = base + v
+
+                          found.add(v)
+
+              clean = []
+
+              for x in found:
+
+                  if not x.startswith("http"):
+                      continue
+
+                  if "<" in x or ">" in x:
+                      continue
+
+                  if ".html" in x:
+                      continue
+
+                  clean.append(x)
+
+              print(json.dumps(list(set(clean))))
 
           except Exception:
               print("[]")
@@ -133,99 +198,108 @@ jobs:
             --remux-video mp4 \
             --geo-bypass \
             --no-check-certificates \
-            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537.36" \
+            --restrict-filenames \
+            --no-call-home \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537
             --referer "https://www.pornhub.com/" \
             --add-header "Accept-Language:en-US,en;q=0.9" \
             --add-header "Origin:https://www.pornhub.com" \
             --add-header "Sec-Fetch-Dest:empty" \
             --add-header "Sec-Fetch-Mode:cors" \
-            --add-header "Sec-Fetch-Site:same-site" \
-            --add-header "Connection:keep-alive" \
-            --add-header "DNT:1" \
-            --downloader-args "ffmpeg:-headers Referer:https://www.pornhub.com/" \
-            -f "bestvideo+bestaudio/best" \
+            --add-header
+                        --add-header "Sec-Fetch-Site:same-origin" \
             -o "video.%(ext)s" \
             "$URL"
+
+          STATUS=$?
 
           echo "===================================="
           echo "Checking downloaded files..."
           echo "===================================="
 
-          ls -lah || true
+          ls -lah
 
-          VALID=0
+          FOUND=$(find . -type f \( \
+            -iname "*.mp4" -o \
+            -iname "*.mkv" -o \
+            -iname "*.webm" -o \
+            -iname "*.mov" \
+          \) | wc -l)
 
-          for f in *; do
+          echo "FOUND FILES: $FOUND"
 
-            if [ -f "$f" ]; then
-
-              SIZE=$(stat -c%s "$f")
-
-              echo "$f size: $SIZE"
-                            if [ "$SIZE" -gt 1000000 ]; then
-                VALID=1
-              else
-                echo "Removing small file: $f"
-                rm -f "$f"
-              fi
-
-            fi
-
-          done
-
-          if [ "$VALID" -eq 0 ]; then
+          if [ "$FOUND" -eq "0" ]; then
 
             echo "===================================="
-            echo "yt-dlp did not produce a valid file"
-            echo "Trying fallback extractor..."
+            echo "yt-dlp failed, trying manual extractor..."
             echo "===================================="
 
             cd ..
 
-            python extractor.py "$URL" > links.json
+            python3 extractor.py "$URL" > links.json
 
+            echo "FOUND MEDIA:"
             cat links.json
 
-            COUNT=$(jq length links.json)
+            FIRST=$(jq -r '.[0]' links.json)
 
-            if [ "$COUNT" -gt 0 ]; then
+            if [ "$FIRST" != "null" ] && [ ! -z "$FIRST" ]; then
 
-              echo "Found $COUNT candidate streams"
+              echo "===================================="
+              echo "Trying extracted link:"
+              echo "$FIRST"
+              echo "===================================="
 
-              for STREAM in $(jq -r '.[]' links.json); do
+              cd downloads
 
-                echo "Trying stream:"
-                echo "$STREAM"
+              yt-dlp \
+                --ignore-errors \
+                --retries 20 \
+                --fragment-retries 20 \
+                --downloader ffmpeg \
+                --hls-use-mpegts \
+                --merge-output-format mp4 \
+                --referer "$URL" \
+                --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537.36" \
+                -o "video_fallback.%(ext)s" \
+                "$FIRST"
 
-                yt-dlp \
-                  --ignore-errors \
-                  --retries 20 \
-                  --fragment-retries 20 \
-                  --concurrent-fragments 8 \
-                  --downloader ffmpeg \
-                  --hls-use-mpegts \
-                  --merge-output-format mp4 \
-                  --remux-video mp4 \
-                  --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
-                  --referer "$URL" \
-                  -o "downloads/fallback_%(id)s.%(ext)s" \
-                  "$STREAM"
+              if [ ! -f video_fallback.mp4 ]; then
 
-              done
+                echo "===================================="
+                echo "Trying ffmpeg direct..."
+                echo "===================================="
 
-            else
-              echo "No streams found by extractor."
+                ffmpeg \
+                  -headers "Referer: $URL\r\nUser-Agent: Mozilla/5.0\r\n" \
+                  -i "$FIRST" \
+                  -c copy \
+                  fallback_video.mp4
+              fi
             fi
-
           fi
+
+          echo "===================================="
+          echo "Final files:"
+          echo "===================================="
+
+          find downloads -type f || true
 
       - name: Commit downloaded videos
         run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "actions@github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add downloads/* || true
+          git add downloads || true
 
-          git commit -m "Add downloaded video" || echo "Nothing to commit"
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+
+          git commit -m "Add downloaded video"
 
           git push
+
+      - name: Upload artifact backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloaded-video
+          path: downloads/
