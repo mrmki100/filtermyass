@@ -1,329 +1,298 @@
-name: Video Downloader Workflow
+name: Video Downloader
 
 on:
   workflow_dispatch:
     inputs:
-      urls:
-        description: "Video URLs (one per line)"
-        required: true
-        type: string
-
-      quality:
-        description: "Preferred quality"
+      url1:
+        description: "Video URL 1"
         required: false
-        default: "best"
-        type: string
-
-      mode:
-        description: "Download mode"
+      url2:
+        description: "Video URL 2"
         required: false
-        default: "normal"
-        type: choice
-        options:
-          - normal
-          - hard
-
-      cookie_domain:
-        description: "Domain for cookie extraction"
+      url3:
+        description: "Video URL 3"
         required: false
-        type: string
+      url4:
+        description: "Video URL 4"
+        required: false
+      url5:
+        description: "Video URL 5"
+        required: false
+
+permissions:
+  contents: write
 
 jobs:
   download:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
 
-      #######################################################
-      # CHECKOUT
-      #######################################################
+    - uses: actions/checkout@v4
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      #######################################################
-      # PYTHON
-      #######################################################
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
+    - name: Install tools
+      run: |
 
-      #######################################################
-      # SYSTEM DEPENDENCIES
-      #######################################################
+        python3 -m pip install --upgrade pip
+        pip install yt-dlp playwright
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg wget jq p7zip-full curl
 
-          sudo apt-get install -y \
-            ffmpeg \
-            mediainfo \
-            zip \
-            unzip \
-            curl \
-            wget \
-            jq
+        playwright install chromium
 
-      #######################################################
-      # PYTHON REQUIREMENTS
-      #######################################################
+    - name: Prepare URLs
+      run: |
 
-      - name: Install Python requirements
-        run: |
-          pip install --upgrade pip
+        cat > urls.txt <<EOF
+        ${{ github.event.inputs.url1 }}
+        ${{ github.event.inputs.url2 }}
+        ${{ github.event.inputs.url3 }}
+        ${{ github.event.inputs.url4 }}
+        ${{ github.event.inputs.url5 }}
+        EOF
 
-          pip install \
-            yt-dlp \
-            requests \
-            beautifulsoup4 \
-            lxml \
-            m3u8 \
-            playwright
+        sed -i '/^$/d' urls.txt
 
-          playwright install --with-deps chromium
+    - name: Create network interceptor
+      run: |
 
-      #######################################################
-      # CREATE INTERCEPTOR
-      #######################################################
+        cat > intercept.py << 'PY'
+        import sys
+        import json
+        from playwright.sync_api import sync_playwright
 
-      - name: Create interceptor.py
-        run: |
-          cat > interceptor.py << 'EOF'
-          #!/usr/bin/env python3
+        url=sys.argv[1]
+        media=[]
 
-          from http.server import HTTPServer, BaseHTTPRequestHandler
-          import urllib.parse
-          import requests
-          import m3u8
+        def valid(u):
+            good=[".mp4",".m3u8",".mpd","videoplayback","manifest"]
+            bad=[".jpg",".png",".gif",".css",".js",".svg"]
 
-          class InterceptorHandler(BaseHTTPRequestHandler):
+            for b in bad:
+                if b in u.lower():
+                    return False
 
-              def do_GET(self):
+            for g in good:
+                if g in u.lower():
+                    return True
 
-                  parsed = urllib.parse.urlparse(self.path)
-                  query = urllib.parse.parse_qs(parsed.query)
+            return False
 
-                  if 'url' not in query:
-                      self.send_response(400)
-                      self.end_headers()
-                      return
+        with sync_playwright() as p:
 
-                  target_url = query['url'][0]
+            browser=p.chromium.launch(headless=True)
+            page=browser.new_page()
 
-                  try:
+            def resp(r):
+                try:
+                    u=r.url
+                    ct=r.headers.get("content-type","")
 
-                      resp = requests.get(
-                          target_url,
-                          timeout=15
-                      )
+                    if valid(u) or "video" in ct or "mpegurl" in ct:
+                        media.append({
+                            "url":u,
+                            "type":ct
+                        })
+                except:
+                    pass
 
-                      if resp.status_code != 200:
-                          self.send_response(404)
-                          self.end_headers()
-                          return
+            page.on("response",resp)
 
-                      if target_url.endswith(".m3u8"):
+            page.goto(url,timeout=90000,wait_until="networkidle")
 
-                          playlist = m3u8.loads(resp.text)
+            try:
+                page.locator("video").click(timeout=5000)
+            except:
+                pass
 
-                          filtered_segments = []
+            page.wait_for_timeout(15000)
 
-                          for seg in playlist.segments:
+            browser.close()
 
-                              if not any(
-                                  x in seg.uri.lower()
-                                  for x in [
-                                      "ads",
-                                      "promo",
-                                      "banner",
-                                      "doubleclick"
-                                  ]
-                              ):
-                                  filtered_segments.append(seg)
+        uniq=[]
+        seen=set()
 
-                          playlist.segments = filtered_segments
+        for m in media:
+            if m["url"] not in seen:
+                seen.add(m["url"])
+                uniq.append(m)
 
-                          self.send_response(200)
+        print(json.dumps(uniq))
+        PY
 
-                          self.send_header(
-                              "Content-Type",
-                              "application/vnd.apple.mpegurl"
-                          )
+    - name: Download videos
+      run: |
 
-                          self.end_headers()
+        mkdir -p downloads
 
-                          self.wfile.write(
-                              playlist.dumps().encode()
-                          )
+        while IFS= read -r URL
+        do
 
-                          return
+          (
+          echo "PROCESSING $URL"
 
-                      self.send_response(200)
-                      self.end_headers()
-                      self.wfile.write(resp.content)
+          TS=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
+          DIR="downloads/$TS"
+          mkdir -p "$DIR"
 
-                  except Exception as e:
-                      print(e)
+          ################################
+          # STEP 1 yt-dlp
+          ################################
 
-                      self.send_response(500)
-                      self.end_headers()
+          echo "STEP1 yt-dlp"
 
-          if __name__ == "__main__":
+          yt-dlp \
+            --no-playlist \
+            -f "bestvideo+bestaudio/best" \
+            --merge-output-format mp4 \
+            --retries 10 \
+            --fragment-retries 10 \
+            --concurrent-fragments 4 \
+            -o "$DIR/%(title).120s_%(id)s.%(ext)s" \
+            "$URL" || true
 
-              server = HTTPServer(
-                  ("0.0.0.0", 8765),
-                  InterceptorHandler
-              )
+          FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
 
-              print("Interceptor running on port 8765")
+          SIZE=0
 
-              server.serve_forever()
-          EOF
-
-      #######################################################
-      # SAVE URLS
-      #######################################################
-
-      - name: Save URLs
-        run: |
-          echo "${{ inputs.urls }}" > urls.txt
-
-          echo "Saved URLs:"
-          cat urls.txt
-
-      #######################################################
-      # START INTERCEPTOR
-      #######################################################
-
-      - name: Start interceptor
-        run: |
-          python3 interceptor.py &
-
-          echo $! > interceptor.pid
-
-          sleep 3
-
-      #######################################################
-      # MAIN DOWNLOAD
-      #######################################################
-
-      - name: Download videos
-        run: |
-
-          mkdir -p downloads
-
-          mapfile -t URL_ARRAY < urls.txt
-
-          for url in "${URL_ARRAY[@]}"
-          do
-
-            echo "================================="
-            echo "PROCESSING:"
-            echo "$url"
-            echo "================================="
-
-            QUALITY="${{ inputs.quality }}"
-
-            if [[ "$QUALITY" == "best" ]]; then
-
-              FORMAT="bestvideo+bestaudio/best"
-
-            elif [[ "$QUALITY" == "worst" ]]; then
-
-              FORMAT="worst"
-
-            else
-
-              HEIGHT="${QUALITY%p}"
-
-              FORMAT="best[height<=${HEIGHT}]"
-
-            fi
-
-            FILTERED_URL="$url"
-
-            if [[ "$url" == *".m3u8"* ]]; then
-
-              FILTERED_URL="http://localhost:8765?url=$url"
-
-            fi
-
-            yt-dlp \
-              --user-agent "Mozilla/5.0" \
-              --no-check-certificate \
-              --retries 20 \
-              --fragment-retries 20 \
-              --concurrent-fragments 5 \
-              --no-part \
-              --merge-output-format mp4 \
-              -f "$FORMAT" \
-              -o "downloads/%(title)s.%(ext)s" \
-              "$FILTERED_URL" || true
-
-          done
-
-      #######################################################
-      # MEDIAINFO
-      #######################################################
-
-      - name: Generate MediaInfo
-        run: |
-
-          for file in downloads/*.{mp4,mkv,webm,avi}
-          do
-
-            if [ -f "$file" ]; then
-
-              echo "================================="
-              echo "$file"
-              echo "================================="
-
-              mediainfo "$file"
-
-            fi
-
-          done
-
-      #######################################################
-      # ZIP
-      #######################################################
-
-      - name: Create zip archive
-        run: |
-
-          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-
-          zip -r \
-            "video_downloads_${TIMESTAMP}.zip" \
-            downloads/
-
-      #######################################################
-      # UPLOAD
-      #######################################################
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: video-downloads
-          path: video_downloads_*.zip
-          retention-days: 7
-
-      #######################################################
-      # CLEANUP
-      #######################################################
-
-      - name: Cleanup
-        run: |
-
-          if [ -f interceptor.pid ]; then
-            kill $(cat interceptor.pid) || true
+          if [ ! -z "$FILE" ]; then
+            SIZE=$(stat -c%s "$FILE")
           fi
 
-          rm -f interceptor.pid
-          rm -f interceptor.py
-          rm -f urls.txt
+          ################################
+          # HARD MODE
+          ################################
 
-          echo "All processes completed successfully"
+          if [ -z "$FILE" ] || [ $SIZE -lt 1000000 ]; then
+
+            echo "START HARD MODE"
+
+            rm -f "$DIR"/* || true
+
+            python3 intercept.py "$URL" > "$DIR/media.json"
+
+            echo "MEDIA FOUND"
+            cat "$DIR/media.json"
+
+            ################################
+            # FILTER MEDIA
+            ################################
+
+            cat "$DIR/media.json" \
+            | jq -r '.[].url' \
+            | grep -vE 'adtng|doubleclick|jerkmate|amateur\.tv|creative|banner|ads' \
+            > "$DIR/all.txt"
+
+            ################################
+            # TRY M3U8 FIRST
+            ################################
+
+            grep '\.m3u8' "$DIR/all.txt" > "$DIR/m3u8.txt" || true
+
+            SUCCESS=0
+
+            while read M
+            do
+
+              if [ -z "$M" ]; then
+                continue
+              fi
+
+              echo "TRY HLS $M"
+
+              yt-dlp \
+                --referer "$URL" \
+                -f best \
+                --merge-output-format mp4 \
+                -o "$DIR/stream.%(ext)s" \
+                "$M" && SUCCESS=1 && break
+
+            done < "$DIR/m3u8.txt"
+
+            ################################
+            # TRY MP4
+            ################################
+
+            if [ $SUCCESS -eq 0 ]; then
+
+              grep '\.mp4' "$DIR/all.txt" > "$DIR/mp4.txt" || true
+
+              while read M
+              do
+
+                if [ -z "$M" ]; then
+                  continue
+                fi
+
+                echo "TRY MP4 $M"
+
+                wget \
+                  --referer="$URL" \
+                  --user-agent="Mozilla/5.0" \
+                  -O "$DIR/video.mp4" \
+                  "$M" && SUCCESS=1 && break
+
+              done < "$DIR/mp4.txt"
+
+            fi
+
+          fi
+
+          ################################
+          # VALIDATE FILE
+          ################################
+
+          FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
+
+          if [ ! -z "$FILE" ]; then
+
+            SIZE=$(stat -c%s "$FILE")
+
+            echo "SIZE $SIZE"
+
+            if [ $SIZE -lt 1000000 ]; then
+              echo "FAIL tiny"
+              rm -f "$FILE"
+            fi
+          fi
+
+          ################################
+          # SPLIT BIG FILE
+          ################################
+
+          FILE=$(find "$DIR" -type f -iname "*.mp4" | head -n1 || true)
+
+          if [ ! -z "$FILE" ]; then
+
+            SIZE=$(stat -c%s "$FILE")
+
+            if [ $SIZE -gt 95000000 ]; then
+
+              echo "SPLIT"
+
+              7z a -v90m "$DIR/video.7z" "$FILE"
+
+              rm "$FILE"
+
+            fi
+          fi
+
+          ) &
+
+        done < urls.txt
+
+        wait
+
+    - name: Commit
+      run: |
+
+        git config user.name github-actions
+        git config user.email github-actions@github.com
+
+        git add downloads
+
+        git commit -m "videos downloaded" || echo nothing
+
+        git push
