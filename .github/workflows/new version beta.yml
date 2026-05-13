@@ -1,30 +1,21 @@
-name: Video Downloader V5 Ultra Fixed
+name: Video Downloader V6 Ultra
 
 on:
   workflow_dispatch:
     inputs:
       url1:
-        description: "Video URL 1"
         required: false
         type: string
-
       url2:
-        description: "Video URL 2"
         required: false
         type: string
-
       url3:
-        description: "Video URL 3"
         required: false
         type: string
-
       url4:
-        description: "Video URL 4"
         required: false
         type: string
-
       url5:
-        description: "Video URL 5"
         required: false
         type: string
 
@@ -52,19 +43,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          fetch-tags: false
-          persist-credentials: true
-          ref: ${{ github.ref }}
 
-      - name: Fix git directory
+      - name: Fix git
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           chown -R root:root "$GITHUB_WORKSPACE" || true
-
-      - name: Fix cache permissions
-        run: |
-          mkdir -p /github/home/.cache/pip
-          chmod -R 777 /github/home/.cache || true
 
       - name: Cache pip
         uses: actions/cache@v4
@@ -72,7 +55,7 @@ jobs:
           path: /github/home/.cache/pip
           key: pip-${{ runner.os }}
 
-      - name: Cache Playwright
+      - name: Cache playwright
         uses: actions/cache@v4
         with:
           path: /ms-playwright
@@ -81,21 +64,21 @@ jobs:
       - name: Install tools
         run: |
 
-          set -e
-
           apt-get update
 
           apt-get install -y \
             ffmpeg \
-            wget \
             curl \
+            wget \
             jq \
             aria2 \
             p7zip-full
 
           python3 -m pip install --upgrade pip
 
-          pip install -U yt-dlp playwright
+          pip install -U \
+            yt-dlp \
+            playwright
 
           playwright install chromium || true
 
@@ -114,102 +97,136 @@ jobs:
 
           cat urls.txt \
           | sed '/^$/d' \
-          | grep -vi 'youtube.com' \
-          | grep -vi 'youtu.be' \
           | sort -u \
-          > cleaned.txt || true
+          > clean.txt
 
-          mv cleaned.txt urls.txt
+          mv clean.txt urls.txt
 
           echo "========== URLS =========="
           cat urls.txt || true
 
-      - name: Create interceptor
+      - name: Create browser extractor
         run: |
 
           cat > intercept.py << 'PY'
           import sys
           import json
+          import re
           from playwright.sync_api import sync_playwright
 
           url = sys.argv[1]
-          media = []
+
+          found = []
+
+          VIDEO_PATTERNS = [
+              ".mp4",
+              ".m3u8",
+              ".mpd",
+              ".webm",
+              ".mov",
+              "playlist",
+              "manifest",
+              "stream"
+          ]
+
+          BAD = [
+              ".jpg",
+              ".jpeg",
+              ".png",
+              ".gif",
+              ".svg",
+              ".css",
+              ".js",
+              "analytics",
+              "doubleclick",
+              "ads"
+          ]
 
           def valid(u):
+
               ul = u.lower()
 
-              good = [
-                  ".mp4", ".m3u8", ".mpd", ".mov",
-                  ".webm", ".mkv", "playlist",
-                  "manifest", "stream"
-              ]
-
-              bad = [
-                  ".jpg", ".jpeg", ".png", ".gif",
-                  ".svg", ".css", ".js",
-                  "banner", "ads", "analytics",
-                  "doubleclick"
-              ]
-
-              for b in bad:
+              for b in BAD:
                   if b in ul:
                       return False
 
-              for g in good:
-                  if g in ul:
+              for p in VIDEO_PATTERNS:
+                  if p in ul:
                       return True
 
               return False
 
           with sync_playwright() as p:
 
-              browser = p.chromium.launch(headless=True)
+              browser = p.chromium.launch(
+                  headless=True,
+                  args=[
+                      "--disable-blink-features=AutomationControlled",
+                      "--no-sandbox",
+                      "--disable-dev-shm-usage"
+                  ]
+              )
 
               context = browser.new_context(
-                  user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
+                  viewport={"width": 1920, "height": 1080},
+                  user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+                  locale="en-US"
               )
 
               page = context.new_page()
 
-              def handle_response(r):
+              def collect(r):
+
                   try:
+
                       u = r.url
                       ct = r.headers.get("content-type", "")
 
-                      if valid(u) or "video" in ct or "mpegurl" in ct:
-                          media.append({
-                              "url": u,
-                              "type": ct
-                          })
+                      if valid(u):
+                          found.append(u)
+
+                      if "video" in ct:
+                          found.append(u)
+
+                      if "mpegurl" in ct:
+                          found.append(u)
 
                   except:
                       pass
 
-              page.on("response", handle_response)
+              page.on("response", collect)
 
               try:
+
                   page.goto(
                       url,
                       timeout=120000,
-                      wait_until="domcontentloaded"
+                      wait_until="networkidle"
                   )
 
-                  page.wait_for_timeout(30000)
+                  page.mouse.move(500, 500)
+
+                  page.wait_for_timeout(10000)
+
+                  try:
+                      page.click("button")
+                  except:
+                      pass
+
+                  page.wait_for_timeout(20000)
 
               except:
                   pass
 
               browser.close()
 
-          unique = []
-          seen = set()
+          final = []
 
-          for m in media:
-              if m["url"] not in seen:
-                  seen.add(m["url"])
-                  unique.append(m)
+          for x in found:
+              if x not in final:
+                  final.append(x)
 
-          print(json.dumps(unique))
+          print(json.dumps(final))
           PY
 
       - name: Download videos
@@ -224,30 +241,39 @@ jobs:
 
             [ -z "$URL" ] && continue
 
-            echo "======================================"
+            echo "====================================="
             echo "PROCESSING: $URL"
-            echo "======================================"
+            echo "====================================="
 
-            TS=$(date +"%Y-%m-%d_%H-%M-%S")_$RANDOM
-            DIR="downloads/$TS"
+            ID=$(date +%s)_$RANDOM
+
+            DIR="downloads/$ID"
 
             mkdir -p "$DIR"
 
+            UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
+
             yt-dlp \
-              --no-playlist \
               --ignore-errors \
               --continue \
-              --retries 20 \
-              --fragment-retries 20 \
-              --extractor-retries 20 \
+              --retries 25 \
+              --fragment-retries 25 \
+              --extractor-retries 25 \
               --retry-sleep 5 \
-              --sleep-requests 1 \
-              --concurrent-fragments 2 \
-              --merge-output-format mp4 \
+              --concurrent-fragments 4 \
+              --geo-bypass \
+              --geo-bypass-country US \
+              --no-playlist \
               --restrict-filenames \
-              --user-agent "Mozilla/5.0" \
+              --socket-timeout 30 \
+              --user-agent "$UA" \
+              --add-header "User-Agent:$UA" \
+              --add-header "Accept-Language:en-US,en;q=0.9" \
+              --add-header "Referer:https://www.google.com/" \
+              --add-header "Origin:https://www.google.com" \
+              --merge-output-format mp4 \
               -f "bv*+ba/b" \
-              -o "$DIR/%(title).120s_%(id)s.%(ext)s" \
+              -o "$DIR/%(title).100s_%(id)s.%(ext)s" \
               "$URL" || true
 
             FILE=$(find "$DIR" -type f \
@@ -262,73 +288,68 @@ jobs:
 
             if [ -z "$FILE" ] || [ "$SIZE" -lt 5000000 ]; then
 
+              echo "PRIMARY FAILED -> PLAYWRIGHT"
+
               rm -f "$DIR"/* || true
 
               python3 intercept.py "$URL" > "$DIR/media.json" 2>/dev/null || true
 
-              cat "$DIR/media.json" 2>/dev/null \
-              | jq -r '.[].url' 2>/dev/null \
-              | grep -viE 'ads|banner|doubleclick|analytics|preview|thumb|sprite' \
+              cat "$DIR/media.json" \
+              | jq -r '.[]' \
+              | grep -Ei '\.m3u8|\.mp4|\.mpd|\.webm|manifest|playlist|stream' \
               | sort -u \
-              > "$DIR/all.txt" || true
+              > "$DIR/links.txt" || true
 
               SUCCESS=0
 
-              grep -i '\.m3u8' "$DIR/all.txt" \
-              > "$DIR/m3u8.txt" || true
-
-              while read M
+              while read MEDIA
               do
 
-                [ -z "$M" ] && continue
+                [ -z "$MEDIA" ] && continue
+
+                echo "TRYING: $MEDIA"
 
                 yt-dlp \
-                  --referer "$URL" \
-                  --add-header "Referer:$URL" \
-                  --add-header "User-Agent:Mozilla/5.0" \
+                  --ignore-errors \
+                  --no-check-certificates \
+                  --geo-bypass \
                   --hls-use-mpegts \
                   --retries 20 \
                   --fragment-retries 20 \
+                  --socket-timeout 30 \
+                  --user-agent "$UA" \
+                  --add-header "User-Agent:$UA" \
+                  --add-header "Referer:$URL" \
+                  --add-header "Accept-Language:en-US,en;q=0.9" \
                   -f best \
                   --merge-output-format mp4 \
-                  -o "$DIR/stream.%(ext)s" \
-                  "$M" \
+                  -o "$DIR/video.%(ext)s" \
+                  "$MEDIA" \
                   && SUCCESS=1 && break
 
-              done < "$DIR/m3u8.txt"
+                aria2c \
+                  --max-connection-per-server=8 \
+                  --split=8 \
+                  --min-split-size=1M \
+                  --retry-wait=5 \
+                  --max-tries=20 \
+                  --user-agent="$UA" \
+                  --referer="$URL" \
+                  -d "$DIR" \
+                  -o "video.mp4" \
+                  "$MEDIA" \
+                  && SUCCESS=1 && break
 
-              if [ "$SUCCESS" -eq 0 ]; then
+                curl -L \
+                  --retry 20 \
+                  --retry-delay 5 \
+                  -A "$UA" \
+                  -e "$URL" \
+                  "$MEDIA" \
+                  -o "$DIR/video.mp4" \
+                  && SUCCESS=1 && break
 
-                grep -Ei '\.mp4|\.mov|\.mkv|\.webm' "$DIR/all.txt" \
-                | sort -u \
-                > "$DIR/direct.txt" || true
-
-                while read M
-                do
-
-                  [ -z "$M" ] && continue
-
-                  yt-dlp \
-                    --ignore-errors \
-                    --no-check-certificates \
-                    --add-header "Referer:$URL" \
-                    --add-header "User-Agent:Mozilla/5.0" \
-                    -o "$DIR/direct.%(ext)s" \
-                    "$M" \
-                    && SUCCESS=1 && break
-
-                  curl -L \
-                    --retry 20 \
-                    --retry-delay 5 \
-                    -A "Mozilla/5.0" \
-                    -e "$URL" \
-                    "$M" \
-                    -o "$DIR/video.mp4" \
-                    && SUCCESS=1 && break
-
-                done < "$DIR/direct.txt"
-
-              fi
+              done < "$DIR/links.txt"
 
             fi
 
@@ -340,27 +361,35 @@ jobs:
 
               SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
 
+              echo "FINAL SIZE: $SIZE"
+
               if [ "$SIZE" -lt 5000000 ]; then
+                echo "BAD FILE REMOVED"
                 rm -f "$FILE" || true
               fi
 
               if [ "$SIZE" -gt 95000000 ]; then
+
+                echo "COMPRESSING"
+
                 7z a -v90m "$DIR/video.7z" "$FILE" || true
+
                 rm -f "$FILE" || true
+
               fi
 
             fi
 
           done < urls.txt
 
-      - name: Upload artifacts
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: downloaded-videos
           path: downloads
           if-no-files-found: ignore
 
-      - name: Commit downloads
+      - name: Commit
         run: |
 
           git config user.name "github-actions"
@@ -369,11 +398,11 @@ jobs:
           git add downloads || true
 
           if git diff --cached --quiet; then
-            echo "NO CHANGES"
+            echo "NO FILES"
             exit 0
           fi
 
-          git commit -m "videos downloaded" || true
+          git commit -m "downloaded videos" || true
 
           git pull --rebase origin "${GITHUB_REF_NAME}" || true
 
